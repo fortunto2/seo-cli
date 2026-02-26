@@ -30,6 +30,7 @@ sites:
     sitemap: "https://example.com/sitemap.xml"
     name: "MySite"
     path: "/path/to/my-site"          # optional: local project directory
+    github: "user/my-site"            # optional: GitHub repo (owner/repo)
     framework: "nextjs"               # optional: nextjs | astro | etc.
     hosting: "vercel"                 # optional: vercel | cloudflare | etc.
 
@@ -37,5 +38,6 @@ sites:
   #   sitemap: "https://another-site.com/sitemap.xml"
   #   name: "AnotherSite"
   #   path: "/path/to/another-site"
+  #   github: "user/another-site"
   #   framework: "astro"
   #   hosting: "cloudflare"
