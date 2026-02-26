@@ -26,19 +26,10 @@ indexnow:
 
 # All your sites
 sites:
-  - url: "https://face-alarm.com"
-    sitemap: "https://face-alarm.com/sitemap.xml"
-    name: "FaceAlarm"
+  - url: "https://example.com"
+    sitemap: "https://example.com/sitemap.xml"
+    name: "MySite"
 
-  - url: "https://life2.film"
-    sitemap: "https://life2.film/sitemap.xml"
-    name: "Life2Film"
-
-  - url: "https://you2idea.com"
-    sitemap: "https://you2idea.com/sitemap.xml"
-    name: "You2Idea"
-
-  # Add more sites here:
-  # - url: "https://example.com"
-  #   sitemap: "https://example.com/sitemap.xml"
-  #   name: "Example"
+  # - url: "https://another-site.com"
+  #   sitemap: "https://another-site.com/sitemap.xml"
+  #   name: "AnotherSite"

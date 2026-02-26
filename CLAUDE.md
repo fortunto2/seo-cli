@@ -30,19 +30,11 @@ cd /Users/rustam/startups/tools/seo-cli
 .venv/bin/python cli.py add             # Register all sites in all engines
 ```
 
-## Configured Sites
-
-- **face-alarm.com** — FaceAlarm (Vercel, Next.js)
-- **life2film.com** — Life2Film (Cloudflare Pages, Next.js)
-- **you2idea.com** — You2Idea (Cloudflare Pages, Astro)
-- **superduperai.co** — SuperDuperAI (Vercel, Next.js)
-- **miralinka.com** — Miralinka (Cloudflare Pages, Astro)
-
 ## Credentials
 
-- **Google SA:** `~/.config/seo-cli/service-account.json` (seo-cli@warm-height-437714-m6)
-- **IndexNow key:** in config.yaml, key files deployed to all sites' `public/` dirs
-- **Bing/Yandex:** not yet configured
+- **Google SA:** `~/.config/seo-cli/service-account.json`
+- **IndexNow key:** in config.yaml, key file must be placed at each site's root
+- **Bing/Yandex:** optional, keys go in config.yaml
 
 ## Key Details
 
