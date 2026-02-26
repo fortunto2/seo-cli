@@ -10,6 +10,7 @@ Usage:
     python cli.py analytics       # Search analytics from Google & Yandex
     python cli.py inspect URL     # Check indexing status of a URL (Google)
     python cli.py reindex URL     # Request instant reindexing (Google + IndexNow)
+    python cli.py report          # Full SEO report across all sites
 """
 
 import sys
@@ -47,22 +48,27 @@ def _has_indexnow(cfg: dict) -> bool:
     return bool(cfg.get("indexnow", {}).get("key"))
 
 
+_gsc_cache: dict[str, set[str]] | None = None
+
+
+def _get_gsc_urls(sa_file: str) -> set[str]:
+    """Cached set of all GSC property URLs."""
+    global _gsc_cache
+    if _gsc_cache is None:
+        from engines.google_sc import list_sites
+        sites = list_sites(sa_file)
+        _gsc_cache = {s["siteUrl"] for s in sites}
+    return _gsc_cache
+
+
 def _resolve_gsc_url(sa_file: str, site_url: str) -> str | None:
     """Find the actual GSC property URL for a site (sc-domain: or https://)."""
-    from engines.google_sc import list_sites
     from urllib.parse import urlparse
 
     domain = urlparse(site_url).netloc
-    gsc_sites = list_sites(sa_file)
+    gsc_urls = _get_gsc_urls(sa_file)
 
-    # Try exact matches first, then domain property
-    candidates = [
-        site_url + "/",
-        site_url,
-        f"sc-domain:{domain}",
-    ]
-    gsc_urls = {s["siteUrl"] for s in gsc_sites}
-    for c in candidates:
+    for c in [site_url + "/", site_url, f"sc-domain:{domain}"]:
         if c in gsc_urls:
             return c
     return None
@@ -338,6 +344,113 @@ def cmd_inspect(cfg: dict, url: str):
     print()
 
 
+def cmd_report(cfg: dict):
+    """One-page SEO report across all sites."""
+    sites = cfg.get("sites", [])
+    end = date.today().isoformat()
+    start = (date.today() - timedelta(days=28)).isoformat()
+
+    print(f"\n{'='*70}")
+    print(f"  SEO REPORT — {start} to {end}")
+    print(f"{'='*70}")
+
+    total_clicks = 0
+    total_impressions = 0
+    all_opportunities = []
+
+    if _has_google(cfg):
+        from engines.google_sc import get_search_analytics, inspect_url, list_sitemaps
+        sa = cfg["google"]["service_account_file"]
+
+        for s in sites:
+            gsc_url = _resolve_gsc_url(sa, s["url"])
+            name = s["name"]
+
+            if not gsc_url:
+                print(f"\n  {name:20s} — not in GSC")
+                continue
+
+            # Analytics
+            try:
+                data = get_search_analytics(sa, gsc_url, start, end)
+                rows = data.get("rows", [])
+                clicks = sum(r.get("clicks", 0) for r in rows)
+                impressions = sum(r.get("impressions", 0) for r in rows)
+                total_clicks += clicks
+                total_impressions += impressions
+
+                avg_pos = 0
+                if rows:
+                    avg_pos = sum(r["position"] * r["impressions"] for r in rows) / max(impressions, 1)
+
+                print(f"\n  {name}")
+                print(f"    Clicks: {clicks:,}  |  Impressions: {impressions:,}  |  Avg pos: {avg_pos:.1f}")
+
+                # Top queries
+                if rows:
+                    print(f"    Top queries:")
+                    for r in sorted(rows, key=lambda x: x["clicks"], reverse=True)[:3]:
+                        q = r["keys"][0]
+                        print(f"      {q:35s} clicks={r['clicks']:3d}  pos={r['position']:.1f}")
+
+                # Low-CTR opportunities (high impressions, few clicks)
+                for r in rows:
+                    if r["impressions"] >= 50 and r["clicks"] / max(r["impressions"], 1) < 0.02:
+                        all_opportunities.append({
+                            "site": name,
+                            "query": r["keys"][0],
+                            "impressions": r["impressions"],
+                            "clicks": r["clicks"],
+                            "position": r["position"],
+                        })
+
+            except Exception as e:
+                print(f"\n  {name:20s} — analytics error: {e}")
+
+            # Sitemap check
+            try:
+                sitemaps = list_sitemaps(sa, gsc_url)
+                if sitemaps:
+                    for sm in sitemaps:
+                        errors = sm.get("errors", 0)
+                        warnings = sm.get("warnings", 0)
+                        if errors or warnings:
+                            print(f"    Sitemap issue: {sm.get('path', '?')} — {errors} errors, {warnings} warnings")
+                else:
+                    print(f"    Sitemap: not submitted to Google")
+            except Exception:
+                pass
+
+    # IndexNow status
+    if _has_indexnow(cfg):
+        key = cfg["indexnow"]["key"]
+        import requests
+        print(f"\n  --- IndexNow key verification ---")
+        for s in sites:
+            try:
+                resp = requests.get(f"{s['url']}/{key}.txt", timeout=10)
+                if resp.status_code == 200 and key in resp.text:
+                    print(f"    {s['name']:20s} OK")
+                else:
+                    print(f"    {s['name']:20s} MISSING (HTTP {resp.status_code})")
+            except Exception:
+                print(f"    {s['name']:20s} UNREACHABLE")
+
+    # Summary
+    print(f"\n{'='*70}")
+    print(f"  TOTALS: {total_clicks:,} clicks  |  {total_impressions:,} impressions")
+    print(f"{'='*70}")
+
+    # Opportunities
+    if all_opportunities:
+        print(f"\n  LOW-CTR OPPORTUNITIES (high impressions, low clicks):")
+        for opp in sorted(all_opportunities, key=lambda x: x["impressions"], reverse=True)[:10]:
+            ctr = opp["clicks"] / max(opp["impressions"], 1) * 100
+            print(f"    [{opp['site']:15s}] {opp['query']:30s} imp={opp['impressions']:5d}  ctr={ctr:.1f}%  pos={opp['position']:.1f}")
+
+    print()
+
+
 def cmd_reindex(cfg: dict, url: str):
     """Request instant reindexing of a URL (Google Indexing API + IndexNow)."""
     if not url:
@@ -399,6 +512,7 @@ def main():
         "analytics": lambda: cmd_analytics(cfg),
         "inspect": lambda: cmd_inspect(cfg, sys.argv[2] if len(sys.argv) > 2 else ""),
         "reindex": lambda: cmd_reindex(cfg, sys.argv[2] if len(sys.argv) > 2 else ""),
+        "report": lambda: cmd_report(cfg),
     }
 
     if cmd in commands:
