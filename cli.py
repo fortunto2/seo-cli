@@ -1654,6 +1654,138 @@ def keywords(query, lang):
     console.print(f"\n  [bold]{total}[/] keyword ideas found.\n")
 
 
+@cli.command()
+@click.option("--days", default=28, help="Number of days to analyze")
+@click.option("--site", default=None, help="Site name (default: all with GA)")
+def ga(days, site):
+    """Google Analytics overview — sessions, pages, channels, countries."""
+    cfg = load_config()
+    if not _has_google(cfg):
+        console.print("[red]Google not configured.[/]")
+        return
+
+    from engines.ga import get_overview, get_top_pages, get_channels, get_countries, get_sources
+
+    sa = cfg["google"]["service_account_file"]
+
+    # Find sites with GA property IDs
+    ga_sites = []
+    for s in cfg.get("sites", []):
+        pid = s.get("ga_property_id")
+        if pid and (not site or s["name"].lower() == site.lower()):
+            ga_sites.append((s["name"], pid))
+
+    if not ga_sites:
+        console.print("[yellow]No sites with ga_property_id in config.[/]")
+        console.print("Add ga_property_id: \"XXXXXXX\" to a site in config.yaml")
+        return
+
+    for name, property_id in ga_sites:
+        console.print(f"\n[bold]Google Analytics — {name}[/] (last {days} days)\n")
+
+        # Overview
+        try:
+            ov = get_overview(sa, property_id, days)
+            if ov:
+                engage_pct = int(ov["engaged_sessions"] / max(ov["sessions"], 1) * 100)
+                bounce_pct = int(ov["bounce_rate"] * 100)
+                avg_min = ov["avg_duration"] / 60
+
+                table = Table(title="Overview", box=box.ROUNDED, show_header=False)
+                table.add_column("Metric", style="bold", min_width=18)
+                table.add_column("Value", justify="right")
+                table.add_row("Sessions", f"{ov['sessions']:,}")
+                table.add_row("Users", f"{ov['users']:,}")
+                table.add_row("New Users", f"{ov['new_users']:,}")
+                table.add_row("Page Views", f"{ov['pageviews']:,}")
+                table.add_row("Avg Duration", f"{avg_min:.1f} min")
+                table.add_row("Bounce Rate", f"{bounce_pct}%")
+                table.add_row("Engaged", f"{ov['engaged_sessions']:,} ({engage_pct}%)")
+                console.print(table)
+        except Exception as e:
+            console.print(f"  [red]Overview error:[/] {e}")
+
+        # Top pages
+        try:
+            pages = get_top_pages(sa, property_id, days, limit=12)
+            if pages:
+                ptable = Table(title="Top Pages", box=box.SIMPLE)
+                ptable.add_column("Path", min_width=30)
+                ptable.add_column("Views", justify="right", style="cyan")
+                ptable.add_column("Users", justify="right")
+                ptable.add_column("Avg Time", justify="right")
+                ptable.add_column("Bounce", justify="right")
+                for p in pages:
+                    dur = float(p.get("averageSessionDuration", 0))
+                    bounce = float(p.get("bounceRate", 0)) * 100
+                    bc = "green" if bounce < 40 else ("yellow" if bounce < 60 else "red")
+                    ptable.add_row(
+                        p["pagePath"][:45],
+                        p["screenPageViews"],
+                        p["totalUsers"],
+                        f"{dur:.0f}s",
+                        f"[{bc}]{bounce:.0f}%[/]",
+                    )
+                console.print(ptable)
+        except Exception as e:
+            console.print(f"  [red]Pages error:[/] {e}")
+
+        # Channels
+        try:
+            channels = get_channels(sa, property_id, days)
+            if channels:
+                ctable = Table(title="Traffic Channels", box=box.SIMPLE)
+                ctable.add_column("Channel", min_width=18)
+                ctable.add_column("Sessions", justify="right", style="cyan")
+                ctable.add_column("Users", justify="right")
+                ctable.add_column("Engaged", justify="right", style="green")
+                ctable.add_column("Pages", justify="right")
+                for c in channels:
+                    ctable.add_row(
+                        c["sessionDefaultChannelGroup"],
+                        c["sessions"], c["totalUsers"],
+                        c["engagedSessions"], c["screenPageViews"],
+                    )
+                console.print(ctable)
+        except Exception as e:
+            console.print(f"  [red]Channels error:[/] {e}")
+
+        # Sources
+        try:
+            sources = get_sources(sa, property_id, days, limit=10)
+            if sources:
+                stable = Table(title="Top Sources", box=box.SIMPLE)
+                stable.add_column("Source / Medium", min_width=25)
+                stable.add_column("Sessions", justify="right", style="cyan")
+                stable.add_column("Users", justify="right")
+                stable.add_column("Engaged", justify="right", style="green")
+                for s_item in sources:
+                    stable.add_row(
+                        s_item["sessionSourceMedium"],
+                        s_item["sessions"], s_item["totalUsers"],
+                        s_item["engagedSessions"],
+                    )
+                console.print(stable)
+        except Exception as e:
+            console.print(f"  [red]Sources error:[/] {e}")
+
+        # Countries
+        try:
+            countries = get_countries(sa, property_id, days, limit=10)
+            if countries:
+                cntable = Table(title="Top Countries", box=box.SIMPLE)
+                cntable.add_column("Country", min_width=15)
+                cntable.add_column("Users", justify="right", style="cyan")
+                cntable.add_column("Sessions", justify="right")
+                for c in countries:
+                    cntable.add_row(c["country"], c["totalUsers"], c["sessions"])
+                console.print(cntable)
+        except Exception as e:
+            console.print(f"  [red]Countries error:[/] {e}")
+
+        console.print()
+
+
 def main():
     cli()
 

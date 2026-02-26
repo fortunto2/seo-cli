@@ -13,6 +13,7 @@ dependencies = [
     "trafilatura>=2.0",
     "yake>=0.7",
     "textstat>=0.7",
+    "google-analytics-data>=0.18",
 ]
 
 [project.scripts]
