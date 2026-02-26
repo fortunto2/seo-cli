@@ -196,6 +196,46 @@ def get_hostnames(sa_file: str, property_id: str, days: int = 28) -> list[dict]:
     return _rows_to_dicts(resp)
 
 
+def get_landing_pages(sa_file: str, property_id: str, days: int = 28, limit: int = 15, hostname: str = None) -> list[dict]:
+    """Get landing pages — first page users see, with engagement metrics."""
+    client = _client(sa_file)
+    resp = client.run_report(RunReportRequest(
+        property=f"properties/{property_id}",
+        date_ranges=[DateRange(start_date=f"{days}daysAgo", end_date="yesterday")],
+        dimensions=[Dimension(name="landingPage")],
+        metrics=[
+            Metric(name="sessions"),
+            Metric(name="totalUsers"),
+            Metric(name="engagedSessions"),
+            Metric(name="averageSessionDuration"),
+            Metric(name="bounceRate"),
+            Metric(name="screenPageViews"),
+        ],
+        order_bys=[OrderBy(metric=OrderBy.MetricOrderBy(metric_name="sessions"), desc=True)],
+        limit=limit,
+        dimension_filter=_host_filter(hostname),
+    ))
+    return _rows_to_dicts(resp)
+
+
+def get_new_vs_returning(sa_file: str, property_id: str, days: int = 28, hostname: str = None) -> list[dict]:
+    """Get new vs returning users breakdown."""
+    client = _client(sa_file)
+    resp = client.run_report(RunReportRequest(
+        property=f"properties/{property_id}",
+        date_ranges=[DateRange(start_date=f"{days}daysAgo", end_date="yesterday")],
+        dimensions=[Dimension(name="newVsReturning")],
+        metrics=[
+            Metric(name="sessions"),
+            Metric(name="totalUsers"),
+            Metric(name="engagedSessions"),
+            Metric(name="averageSessionDuration"),
+        ],
+        dimension_filter=_host_filter(hostname),
+    ))
+    return _rows_to_dicts(resp)
+
+
 def get_realtime(sa_file: str, property_id: str) -> dict:
     """Get realtime active users."""
     client = _client(sa_file)

@@ -1800,6 +1800,290 @@ def ga(days, site):
         console.print()
 
 
+@cli.command()
+@click.option("--days", default=28, help="Number of days to compare")
+@click.option("--site", default=None, help="Site name (default: all with both GA + CF)")
+def compare(days, site):
+    """Compare GA vs Cloudflare — human traffic, landing pages, search performance."""
+    cfg = load_config()
+    sa = cfg.get("google", {}).get("service_account_file")
+    cf_token = cfg.get("cloudflare", {}).get("api_token")
+
+    if not sa or not cf_token:
+        console.print("[red]Need both Google (service_account_file) and Cloudflare (api_token) configured.[/]")
+        return
+
+    from engines.ga import (
+        get_overview, get_landing_pages, get_new_vs_returning,
+        get_channels, get_sources,
+    )
+    from engines.cloudflare import list_zones, get_zone_analytics, get_bot_human_split
+    from engines.google_sc import get_search_analytics
+    from urllib.parse import urlparse
+
+    # Load CF zones
+    try:
+        zones = list_zones(cf_token)
+    except Exception as e:
+        console.print(f"[red]CF zones error:[/] {e}")
+        return
+
+    zone_map = {z["name"]: z for z in zones}
+
+    end = date.today().isoformat()
+    start = (date.today() - timedelta(days=days)).isoformat()
+    dt_start = f"{start}T00:00:00Z"
+    dt_end = f"{end}T23:59:59Z"
+
+    # Collect sites that have both GA and CF
+    sites = cfg.get("sites", [])
+    # Group by ga_property_id to avoid duplicate property queries
+    seen_props = set()
+
+    for s in sites:
+        if site and s["name"].lower() != site.lower():
+            continue
+
+        pid = s.get("ga_property_id")
+        hostname = urlparse(s["url"]).hostname if s.get("url") else None
+        domain = hostname or ""
+
+        # Need at least GA or CF
+        has_ga = bool(pid)
+        zone_info = zone_map.get(domain)
+        has_cf = bool(zone_info)
+
+        if not has_ga and not has_cf:
+            continue
+
+        console.print(f"\n{'='*60}")
+        console.print(f"[bold]{s['name']}[/] — {s.get('url', '?')}  (last {days} days)")
+        console.print(f"{'='*60}\n")
+
+        # --- GA data ---
+        ga_sessions = ga_users = ga_pv = ga_engaged = 0
+        ga_bounce = 0.0
+        if has_ga:
+            # Filter by hostname if property is shared
+            prop_key = f"{pid}:{hostname}"
+            host_filter = hostname if prop_key not in seen_props or True else None
+
+            try:
+                ov = get_overview(sa, pid, days, hostname=hostname)
+                if ov:
+                    ga_sessions = ov["sessions"]
+                    ga_users = ov["users"]
+                    ga_pv = ov["pageviews"]
+                    ga_engaged = ov["engaged_sessions"]
+                    ga_bounce = ov["bounce_rate"]
+            except Exception as e:
+                console.print(f"  [red]GA error:[/] {e}")
+
+        # --- CF data ---
+        cf_requests = cf_pv = cf_uniq = 0
+        cf_human = cf_bot = cf_verified = 0
+        if has_cf:
+            zone_id = zone_info["id"]
+            zone_plan = zone_info.get("plan", "Free")
+            has_bot_mgmt = "enterprise" in zone_plan.lower()
+
+            try:
+                analytics = get_zone_analytics(cf_token, zone_id, start, end)
+                cf_requests = sum(d["sum"]["requests"] for d in analytics)
+                cf_pv = sum(d["sum"]["pageViews"] for d in analytics)
+                cf_uniq = sum(d["uniq"]["uniques"] for d in analytics)
+            except Exception:
+                pass
+
+            if has_bot_mgmt:
+                try:
+                    bot = get_bot_human_split(cf_token, zone_id, dt_start, dt_end)
+                    cf_human = bot["human"]
+                    cf_bot = bot["bot"] + bot.get("likely_bot", 0)
+                    cf_verified = bot.get("verified_bot", 0)
+                except Exception:
+                    pass
+
+        # --- Summary comparison table ---
+        t = Table(title="GA vs Cloudflare", box=box.ROUNDED)
+        t.add_column("Metric", style="bold", min_width=22)
+        t.add_column("Google Analytics", justify="right", style="green")
+        t.add_column("Cloudflare", justify="right", style="cyan")
+        t.add_column("Note", style="dim")
+
+        t.add_row(
+            "Real Users",
+            f"{ga_users:,}" if has_ga else "-",
+            f"{cf_human:,}" if cf_human else f"{cf_uniq:,} uniq",
+            "GA=JS tracked, CF=bot mgmt" if cf_human else "CF=daily uniques sum",
+        )
+        t.add_row(
+            "Page Views",
+            f"{ga_pv:,}" if has_ga else "-",
+            f"{cf_pv:,}" if has_cf else "-",
+            f"CF {cf_pv/max(ga_pv,1):.0f}x more (includes bots)" if ga_pv and cf_pv else "",
+        )
+        t.add_row(
+            "Sessions",
+            f"{ga_sessions:,}" if has_ga else "-",
+            "-",
+            f"engaged: {ga_engaged:,} ({int(ga_engaged/max(ga_sessions,1)*100)}%)" if ga_sessions else "",
+        )
+        t.add_row(
+            "Total Requests",
+            "-",
+            f"{cf_requests:,}" if has_cf else "-",
+            "all HTTP requests incl. assets",
+        )
+
+        if cf_human:
+            t.add_row("", "", "", "")
+            total_bot = cf_bot + cf_verified
+            t.add_row("Humans (CF)", f"[green]{cf_human:,}[/]", f"{cf_human/max(cf_human+total_bot,1)*100:.0f}%", "")
+            t.add_row("Bots (CF)", f"[yellow]{cf_bot:,}[/]", f"{cf_bot/max(cf_human+total_bot,1)*100:.0f}%", "scrapers, AI crawlers")
+            t.add_row("Verified Bots (CF)", f"[dim]{cf_verified:,}[/]", f"{cf_verified/max(cf_human+total_bot,1)*100:.0f}%", "Googlebot, BingBot etc")
+
+        if has_ga and ga_sessions:
+            bounce_pct = int(ga_bounce * 100)
+            bc = "green" if bounce_pct < 40 else ("yellow" if bounce_pct < 60 else "red")
+            t.add_row("", "", "", "")
+            t.add_row("Bounce Rate", f"[{bc}]{bounce_pct}%[/]", "-", "<40% great, >60% needs work")
+
+        console.print(t)
+
+        # --- New vs Returning ---
+        if has_ga and ga_sessions:
+            try:
+                nvr = get_new_vs_returning(sa, pid, days, hostname=hostname)
+                if nvr:
+                    nvr_table = Table(title="New vs Returning Users", box=box.SIMPLE)
+                    nvr_table.add_column("Type", min_width=12)
+                    nvr_table.add_column("Sessions", justify="right", style="cyan")
+                    nvr_table.add_column("Users", justify="right")
+                    nvr_table.add_column("Engaged", justify="right", style="green")
+                    nvr_table.add_column("Avg Duration", justify="right")
+                    for row in nvr:
+                        dur = float(row.get("averageSessionDuration", 0))
+                        nvr_table.add_row(
+                            row.get("newVsReturning", "?"),
+                            row["sessions"], row["totalUsers"],
+                            row["engagedSessions"],
+                            f"{dur:.0f}s",
+                        )
+                    console.print(nvr_table)
+            except Exception as e:
+                console.print(f"  [dim]New/returning: {e}[/]")
+
+        # --- Landing Pages (GA) + Search Queries (GSC) ---
+        if has_ga and ga_sessions:
+            try:
+                landings = get_landing_pages(sa, pid, days, limit=10, hostname=hostname)
+                if landings:
+                    ltable = Table(title="Top Landing Pages (entry points)", box=box.SIMPLE)
+                    ltable.add_column("Landing Page", min_width=30)
+                    ltable.add_column("Sessions", justify="right", style="cyan")
+                    ltable.add_column("Users", justify="right")
+                    ltable.add_column("Engaged", justify="right", style="green")
+                    ltable.add_column("Bounce", justify="right")
+                    ltable.add_column("Pages/Sess", justify="right")
+                    for lp in landings:
+                        sess = int(lp.get("sessions", 0))
+                        engaged = int(lp.get("engagedSessions", 0))
+                        pv = int(lp.get("screenPageViews", 0))
+                        bounce = float(lp.get("bounceRate", 0)) * 100
+                        pps = pv / max(sess, 1)
+                        bc = "green" if bounce < 40 else ("yellow" if bounce < 60 else "red")
+                        ltable.add_row(
+                            lp.get("landingPage", "?")[:45],
+                            str(sess), lp.get("totalUsers", "0"),
+                            str(engaged),
+                            f"[{bc}]{bounce:.0f}%[/]",
+                            f"{pps:.1f}",
+                        )
+                    console.print(ltable)
+            except Exception as e:
+                console.print(f"  [dim]Landing pages: {e}[/]")
+
+        # --- GSC Search Performance ---
+        gsc_url = _resolve_gsc_url(sa, s["url"]) if has_ga else None
+        if gsc_url:
+            try:
+                # Top queries
+                qdata = get_search_analytics(sa, gsc_url, start, end, dimensions=["query"])
+                rows = qdata.get("rows", [])
+                if rows:
+                    qtable = Table(title="Top Search Queries (GSC)", box=box.SIMPLE)
+                    qtable.add_column("Query", min_width=25)
+                    qtable.add_column("Clicks", justify="right", style="cyan")
+                    qtable.add_column("Impressions", justify="right")
+                    qtable.add_column("CTR", justify="right", style="green")
+                    qtable.add_column("Position", justify="right")
+                    for r in rows[:12]:
+                        ctr = r.get("ctr", 0) * 100
+                        pos = r.get("position", 0)
+                        pc = "green" if pos <= 3 else ("yellow" if pos <= 10 else "red")
+                        qtable.add_row(
+                            r["keys"][0][:40],
+                            str(int(r.get("clicks", 0))),
+                            str(int(r.get("impressions", 0))),
+                            f"{ctr:.1f}%",
+                            f"[{pc}]{pos:.1f}[/]",
+                        )
+                    console.print(qtable)
+
+                # Top pages by clicks
+                pdata = get_search_analytics(sa, gsc_url, start, end, dimensions=["page"])
+                prows = pdata.get("rows", [])
+                if prows:
+                    ptable = Table(title="Top Pages by Search Clicks (GSC)", box=box.SIMPLE)
+                    ptable.add_column("Page", min_width=35)
+                    ptable.add_column("Clicks", justify="right", style="cyan")
+                    ptable.add_column("Impressions", justify="right")
+                    ptable.add_column("CTR", justify="right", style="green")
+                    ptable.add_column("Avg Pos", justify="right")
+                    for r in prows[:10]:
+                        url_path = urlparse(r["keys"][0]).path or "/"
+                        ctr = r.get("ctr", 0) * 100
+                        pos = r.get("position", 0)
+                        ptable.add_row(
+                            url_path[:45],
+                            str(int(r.get("clicks", 0))),
+                            str(int(r.get("impressions", 0))),
+                            f"{ctr:.1f}%",
+                            f"{pos:.1f}",
+                        )
+                    console.print(ptable)
+            except Exception as e:
+                console.print(f"  [dim]GSC: {e}[/]")
+
+        # --- AI Referrals (from GA sources) ---
+        if has_ga and ga_sessions:
+            try:
+                sources = get_sources(sa, pid, days, limit=50, hostname=hostname)
+                ai_sources = [
+                    s for s in sources
+                    if any(ai in s.get("sessionSourceMedium", "").lower()
+                           for ai in ["chatgpt", "perplexity", "gemini", "copilot", "claude", "you.com"])
+                ]
+                if ai_sources:
+                    atable = Table(title="AI Referral Traffic", box=box.SIMPLE)
+                    atable.add_column("Source", min_width=25)
+                    atable.add_column("Sessions", justify="right", style="cyan")
+                    atable.add_column("Users", justify="right")
+                    atable.add_column("Engaged", justify="right", style="green")
+                    for ai in ai_sources:
+                        atable.add_row(
+                            ai["sessionSourceMedium"],
+                            ai["sessions"], ai["totalUsers"],
+                            ai["engagedSessions"],
+                        )
+                    console.print(atable)
+            except Exception:
+                pass
+
+        console.print()
+
+
 def main():
     cli()
 
