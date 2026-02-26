@@ -21,7 +21,7 @@ seo-cli/
 ## Commands
 
 ```bash
-cd /Users/rustam/startups/tools/seo-cli
+cd /path/to/seo-cli
 .venv/bin/python cli.py status          # Show all sites + engine connections
 .venv/bin/python cli.py analytics       # Search analytics last 28 days (Google + Yandex)
 .venv/bin/python cli.py inspect URL     # Check indexing status of a URL (Google)
