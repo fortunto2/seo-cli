@@ -1362,7 +1362,7 @@ def traffic(days):
         console.print("[red]Cloudflare not configured.[/] Add cloudflare.api_token to config.yaml")
         return
 
-    from engines.cloudflare import list_zones, get_zone_analytics, get_zone_errors, get_zone_countries
+    from engines.cloudflare import list_zones, get_zone_analytics, get_zone_errors, get_zone_countries, get_bot_human_split
 
     token = cfg["cloudflare"]["api_token"]
     sites = cfg.get("sites", [])
@@ -1380,15 +1380,20 @@ def traffic(days):
 
     console.print(f"\n[bold]Cloudflare Traffic[/] ({start} — {end})\n")
 
+    # Datetime range for adaptive groups (bot score queries need datetime, not date)
+    dt_start = f"{start}T00:00:00Z"
+    dt_end = f"{end}T23:59:59Z"
+
     # Summary table
     summary = Table(title="Traffic Summary", box=box.ROUNDED)
     summary.add_column("Site", style="bold", min_width=18)
     summary.add_column("Page Views", justify="right")
     summary.add_column("Uniques", justify="right", style="cyan")
-    summary.add_column("Requests", justify="right")
+    summary.add_column("Human", justify="right", style="green")
+    summary.add_column("Bots", justify="right", style="yellow")
+    summary.add_column("Verified", justify="right", style="dim")
+    summary.add_column("Requests", justify="right", style="dim")
     summary.add_column("Bandwidth", justify="right")
-    summary.add_column("Threats", justify="right")
-    summary.add_column("Avg/day", justify="right", style="green")
 
     all_site_data = []
 
@@ -1397,13 +1402,14 @@ def traffic(days):
         domain = _urlparse(s["url"]).netloc
         zone_id = zone_map.get(domain)
         if not zone_id:
-            summary.add_row(s["name"], "[dim]not in CF[/]", "", "", "", "", "")
+            summary.add_row(s["name"], "[dim]not in CF[/]", "", "", "", "", "", "")
             continue
+        is_subdomain = len(domain.split(".")) > 2
 
         try:
             analytics = get_zone_analytics(token, zone_id, start, end)
         except Exception as e:
-            summary.add_row(s["name"], f"[red]{e}[/]", "", "", "", "", "")
+            summary.add_row(s["name"], f"[red]{e}[/]", "", "", "", "", "", "")
             continue
 
         total_pv = sum(d["sum"]["pageViews"] for d in analytics)
@@ -1411,7 +1417,20 @@ def traffic(days):
         total_req = sum(d["sum"]["requests"] for d in analytics)
         total_bytes = sum(d["sum"]["bytes"] for d in analytics)
         total_threats = sum(d["sum"]["threats"] for d in analytics)
-        avg_uniq = total_uniq // max(len(analytics), 1)
+
+        # Bot vs human split
+        try:
+            bot_split = get_bot_human_split(token, zone_id, dt_start, dt_end)
+            human_req = bot_split["human"]
+            bot_req = bot_split["bot"] + bot_split.get("likely_bot", 0)
+            verified_req = bot_split.get("verified_bot", 0)
+            human_str = f"{human_req:,}"
+            bot_str = f"{bot_req:,}"
+            verified_str = f"{verified_req:,}" if verified_req else "-"
+        except Exception:
+            human_str = "?"
+            bot_str = "?"
+            verified_str = "?"
 
         # Format bandwidth
         if total_bytes >= 1_000_000_000:
@@ -1421,16 +1440,15 @@ def traffic(days):
         else:
             bw = f"{total_bytes / 1_000:.0f} KB"
 
-        threat_str = f"[red]{total_threats}[/]" if total_threats else "[green]0[/]"
-
         summary.add_row(
             s["name"],
             f"{total_pv:,}",
             f"{total_uniq:,}",
+            human_str,
+            bot_str,
+            verified_str,
             f"{total_req:,}",
             bw,
-            threat_str,
-            f"{avg_uniq:,}/day",
         )
         all_site_data.append({
             "name": s["name"], "domain": domain, "zone_id": zone_id,

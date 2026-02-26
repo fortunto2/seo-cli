@@ -161,6 +161,111 @@ def get_zone_countries(token: str, zone_id: str, date_from: str, date_to: str) -
     )
 
 
+def get_bot_human_split(token: str, zone_id: str, dt_from: str, dt_to: str) -> dict:
+    """Get bot vs human traffic split.
+
+    Tries botManagementDecision first (Enterprise with Bot Management),
+    falls back to requestSource='eyeball' which works on all plans.
+
+    Returns: {human, likely_bot, bot, verified_bot, total, method}
+    """
+    # Try botManagementDecision (Enterprise Bot Management)
+    bm_query = """
+    {
+      viewer {
+        zones(filter: {zoneTag: "%s"}) {
+          human: httpRequestsAdaptiveGroups(
+            filter: { datetime_geq: "%s", datetime_leq: "%s", botManagementDecision: "likely_human" }
+            limit: 1
+          ) { count }
+          likely_auto: httpRequestsAdaptiveGroups(
+            filter: { datetime_geq: "%s", datetime_leq: "%s", botManagementDecision: "likely_automated" }
+            limit: 1
+          ) { count }
+          automated: httpRequestsAdaptiveGroups(
+            filter: { datetime_geq: "%s", datetime_leq: "%s", botManagementDecision: "automated" }
+            limit: 1
+          ) { count }
+          verified: httpRequestsAdaptiveGroups(
+            filter: { datetime_geq: "%s", datetime_leq: "%s", botManagementDecision: "verified_bot" }
+            limit: 1
+          ) { count }
+        }
+      }
+    }
+    """ % (zone_id, dt_from, dt_to, dt_from, dt_to, dt_from, dt_to, dt_from, dt_to)
+
+    try:
+        resp = requests.post(GRAPHQL_URL, headers=_headers(token), json={"query": bm_query}, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+
+        if not data.get("errors"):
+            z = data["data"]["viewer"]["zones"][0]
+            human = sum(g["count"] for g in z.get("human", []))
+            likely_auto = sum(g["count"] for g in z.get("likely_auto", []))
+            automated = sum(g["count"] for g in z.get("automated", []))
+            verified = sum(g["count"] for g in z.get("verified", []))
+            return {
+                "human": human, "likely_bot": likely_auto,
+                "bot": automated, "verified_bot": verified,
+                "total": human + likely_auto + automated + verified,
+                "method": "botManagement",
+            }
+    except Exception:
+        pass
+
+    # Fallback: requestSource eyeball (works on all plans)
+    # Free plans limit adaptive groups to 24h, so query day by day
+    from datetime import datetime, timedelta
+    dt_start = datetime.fromisoformat(dt_from.replace("Z", "+00:00"))
+    dt_end_parsed = datetime.fromisoformat(dt_to.replace("Z", "+00:00"))
+
+    total_all = 0
+    total_eyeball = 0
+    current = dt_start
+
+    while current < dt_end_parsed:
+        day_end = min(current + timedelta(hours=24), dt_end_parsed)
+        day_from = current.strftime("%Y-%m-%dT%H:%M:%SZ")
+        day_to = day_end.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        eyeball_query = """
+        {
+          viewer {
+            zones(filter: {zoneTag: "%s"}) {
+              total: httpRequestsAdaptiveGroups(
+                filter: { datetime_geq: "%s", datetime_leq: "%s" }
+                limit: 1
+              ) { count }
+              eyeball: httpRequestsAdaptiveGroups(
+                filter: { datetime_geq: "%s", datetime_leq: "%s", requestSource: "eyeball" }
+                limit: 1
+              ) { count }
+            }
+          }
+        }
+        """ % (zone_id, day_from, day_to, day_from, day_to)
+
+        try:
+            resp = requests.post(GRAPHQL_URL, headers=_headers(token), json={"query": eyeball_query}, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            if not data.get("errors"):
+                z = data["data"]["viewer"]["zones"][0]
+                total_all += sum(g["count"] for g in z.get("total", []))
+                total_eyeball += sum(g["count"] for g in z.get("eyeball", []))
+        except Exception:
+            pass
+
+        current = day_end
+
+    return {
+        "human": total_eyeball, "likely_bot": 0, "bot": total_all - total_eyeball,
+        "verified_bot": 0, "total": total_all, "method": "eyeball",
+    }
+
+
 def get_ai_crawler_stats(token: str, zone_id: str, dt_from: str, dt_to: str) -> list[dict]:
     """Get AI crawler requests by user-agent pattern for a zone."""
     results = []
