@@ -15,11 +15,13 @@ CONFIG_PATH = Path(__file__).parent / "config.yaml"
 console = Console()
 
 
-def load_config() -> dict:
+def load_config(required: bool = True) -> dict:
     if not CONFIG_PATH.exists():
-        console.print("[red]ERROR:[/] config.yaml not found.")
-        console.print("Copy config.example.yaml to config.yaml and fill in credentials.")
-        sys.exit(1)
+        if required:
+            console.print("[red]ERROR:[/] config.yaml not found.")
+            console.print("Copy config.example.yaml to config.yaml and fill in credentials.")
+            sys.exit(1)
+        return {}
     with open(CONFIG_PATH) as f:
         return yaml.safe_load(f)
 
@@ -515,11 +517,18 @@ def report():
 @cli.command()
 @click.argument("url", required=False)
 def audit(url):
-    """SEO + GEO page audit. Audits all sites if no URL given."""
-    cfg = load_config()
+    """SEO + GEO page audit. Audits all sites if no URL given.
+
+    Works without config.yaml when a URL is provided directly:
+        seo audit https://example.com
+    """
+    cfg = load_config(required=not url)
     from engines.audit import audit_url
 
     urls = [url] if url else [s["url"] for s in cfg.get("sites", [])]
+    if not urls:
+        console.print("[red]ERROR:[/] No URL provided and no sites in config.")
+        return
     multi = len(urls) > 1
 
     all_results = []
@@ -1209,7 +1218,7 @@ def improve(url, history):
     from engines.storage import load_data, save_data, timestamp
     from engines.audit import audit_url
 
-    cfg = load_config()
+    cfg = load_config(required=not url)
 
     # Load previous issues
     prev = load_data("issues.json")

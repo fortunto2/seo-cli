@@ -21,14 +21,19 @@ def _fetch(url: str, timeout: int = 15) -> requests.Response | None:
 
 
 def _extract_meta(html: str, name: str) -> str:
-    """Extract meta tag content by name or property."""
-    for attr in ("name", "property"):
-        m = re.search(rf'<meta\s+{attr}="{name}"\s+content="([^"]*)"', html, re.I)
-        if m:
-            return m.group(1)
-        m = re.search(rf'<meta\s+content="([^"]*)"\s+{attr}="{name}"', html, re.I)
-        if m:
-            return m.group(1)
+    """Extract meta tag content by name or property.
+
+    Handles any attribute order and extra attributes between name/property and content.
+    """
+    # Find all meta tags, then check if they match the target name/property
+    for m in re.finditer(r'<meta\s([^>]+?)/?>', html, re.I):
+        attrs = m.group(1)
+        # Check if this meta tag has the target name or property
+        name_match = re.search(rf'(?:name|property)\s*=\s*["\']({re.escape(name)})["\']', attrs, re.I)
+        if name_match:
+            content_match = re.search(r'content\s*=\s*["\']([^"\']*)["\']', attrs, re.I)
+            if content_match:
+                return content_match.group(1)
     return ""
 
 
@@ -39,13 +44,21 @@ def _extract_tag(html: str, tag: str) -> str:
 
 
 def _extract_jsonld(html: str) -> list[dict]:
-    """Extract all JSON-LD blocks."""
+    """Extract all JSON-LD blocks.
+
+    Handles Cloudflare Rocket Loader prefix on type attribute,
+    and unwraps @graph arrays.
+    """
     results = []
-    for m in re.finditer(r'<script\s+type="application/ld\+json"[^>]*>(.*?)</script>', html, re.S):
+    # Match standard and Rocket Loader-mangled JSON-LD script types
+    for m in re.finditer(r'<script\s+type="[^"]*application/ld\+json"[^>]*>(.*?)</script>', html, re.S):
         try:
             data = json.loads(m.group(1))
             if isinstance(data, list):
                 results.extend(data)
+            elif "@graph" in data:
+                # Unwrap @graph arrays (common pattern)
+                results.extend(data["@graph"])
             else:
                 results.append(data)
         except json.JSONDecodeError:
