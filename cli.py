@@ -1904,52 +1904,40 @@ def compare(days, site):
                 except Exception:
                     pass
 
-        # --- Summary comparison table ---
-        t = Table(title="GA vs Cloudflare", box=box.ROUNDED)
-        t.add_column("Metric", style="bold", min_width=22)
-        t.add_column("Google Analytics", justify="right", style="green")
-        t.add_column("Cloudflare", justify="right", style="cyan")
-        t.add_column("Note", style="dim")
+        # --- Traffic overview table ---
+        t = Table(title="Traffic Overview", box=box.ROUNDED)
+        t.add_column("Metric", style="bold", min_width=20)
+        t.add_column("GA (real users)", justify="right", style="green")
+        t.add_column("CF (all traffic)", justify="right", style="cyan")
 
-        t.add_row(
-            "Real Users",
-            f"{ga_users:,}" if has_ga else "-",
-            f"{cf_human:,}" if cf_human else f"{cf_uniq:,} uniq",
-            "GA=JS tracked, CF=bot mgmt" if cf_human else "CF=daily uniques sum",
-        )
-        t.add_row(
-            "Page Views",
-            f"{ga_pv:,}" if has_ga else "-",
-            f"{cf_pv:,}" if has_cf else "-",
-            f"CF {cf_pv/max(ga_pv,1):.0f}x more (includes bots)" if ga_pv and cf_pv else "",
-        )
-        t.add_row(
-            "Sessions",
-            f"{ga_sessions:,}" if has_ga else "-",
-            "-",
-            f"engaged: {ga_engaged:,} ({int(ga_engaged/max(ga_sessions,1)*100)}%)" if ga_sessions else "",
-        )
-        t.add_row(
-            "Total Requests",
-            "-",
-            f"{cf_requests:,}" if has_cf else "-",
-            "all HTTP requests incl. assets",
-        )
-
-        if cf_human:
-            t.add_row("", "", "", "")
-            total_bot = cf_bot + cf_verified
-            t.add_row("Humans (CF)", f"[green]{cf_human:,}[/]", f"{cf_human/max(cf_human+total_bot,1)*100:.0f}%", "")
-            t.add_row("Bots (CF)", f"[yellow]{cf_bot:,}[/]", f"{cf_bot/max(cf_human+total_bot,1)*100:.0f}%", "scrapers, AI crawlers")
-            t.add_row("Verified Bots (CF)", f"[dim]{cf_verified:,}[/]", f"{cf_verified/max(cf_human+total_bot,1)*100:.0f}%", "Googlebot, BingBot etc")
+        t.add_row("Users", f"{ga_users:,}" if has_ga else "-", f"{cf_uniq:,}" if cf_uniq else "-")
+        t.add_row("Page Views", f"{ga_pv:,}" if has_ga else "-", f"{cf_pv:,}" if has_cf else "-")
+        t.add_row("Sessions", f"{ga_sessions:,}" if has_ga else "-", "-")
+        t.add_row("Total Requests", "-", f"{cf_requests:,}" if has_cf else "-")
 
         if has_ga and ga_sessions:
+            engage_pct = int(ga_engaged / max(ga_sessions, 1) * 100)
             bounce_pct = int(ga_bounce * 100)
             bc = "green" if bounce_pct < 40 else ("yellow" if bounce_pct < 60 else "red")
-            t.add_row("", "", "", "")
-            t.add_row("Bounce Rate", f"[{bc}]{bounce_pct}%[/]", "-", "<40% great, >60% needs work")
+            t.add_row("Engaged Sessions", f"{ga_engaged:,} ({engage_pct}%)", "-")
+            t.add_row("Bounce Rate", f"[{bc}]{bounce_pct}%[/]", "-")
 
         console.print(t)
+
+        # --- CF Bot breakdown ---
+        if cf_human:
+            total_cf = cf_human + cf_bot + cf_verified
+            bt = Table(title="Cloudflare Bot Management", box=box.ROUNDED)
+            bt.add_column("Category", style="bold", min_width=18)
+            bt.add_column("Requests", justify="right")
+            bt.add_column("%", justify="right")
+            bt.add_column("", style="dim")
+
+            bt.add_row("[green]Humans[/]", f"{cf_human:,}", f"{cf_human/max(total_cf,1)*100:.0f}%", "real visitors")
+            bt.add_row("[yellow]Bots[/]", f"{cf_bot:,}", f"{cf_bot/max(total_cf,1)*100:.0f}%", "scrapers, AI crawlers")
+            bt.add_row("[dim]Verified Bots[/]", f"{cf_verified:,}", f"{cf_verified/max(total_cf,1)*100:.0f}%", "Googlebot, BingBot etc")
+            bt.add_row("[bold]Total[/]", f"[bold]{total_cf:,}[/]", "100%", "")
+            console.print(bt)
 
         # --- New vs Returning ---
         if has_ga and ga_sessions:
