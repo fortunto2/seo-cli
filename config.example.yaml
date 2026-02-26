@@ -6,6 +6,10 @@ google:
   # Enable Search Console API: https://console.cloud.google.com/apis/library/searchconsole.googleapis.com
   # Add service account email as Owner in Search Console: Settings > Users
   service_account_file: "/path/to/service-account.json"
+  # Optional fallback for `seo competitors` if SearXNG is unavailable
+  # Primary: SearXNG on localhost:8013, fallback: CSE API, last resort: scraping
+  cse_api_key: ""
+  cse_cx: ""
 
 bing:
   # Get API key: https://www.bing.com/webmasters > Settings > API access
@@ -23,6 +27,12 @@ indexnow:
   # Any random hex string (16+ chars). Run: python -c "import secrets; print(secrets.token_hex(16))"
   # IMPORTANT: You must also place a file named {key}.txt at each site's root
   key: ""
+
+cloudflare:
+  # Create API token: https://dash.cloudflare.com/profile/api-tokens
+  # Permissions: Zone > Analytics > Read (for traffic/crawlers commands)
+  # Optional: Zone > DNS > Read (for DNS record visibility)
+  api_token: ""
 
 # All your sites
 sites:
