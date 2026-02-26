@@ -1664,28 +1664,39 @@ def ga(days, site):
         console.print("[red]Google not configured.[/]")
         return
 
-    from engines.ga import get_overview, get_top_pages, get_channels, get_countries, get_sources
+    from engines.ga import get_overview, get_top_pages, get_channels, get_countries, get_sources, get_hostnames
+    from urllib.parse import urlparse
 
     sa = cfg["google"]["service_account_file"]
 
-    # Find sites with GA property IDs
+    # Collect sites with GA property IDs, extract hostname for filtering
+    # Multiple sites can share one property_id (subdomains) — each filtered by hostname
     ga_sites = []
     for s in cfg.get("sites", []):
         pid = s.get("ga_property_id")
         if pid and (not site or s["name"].lower() == site.lower()):
-            ga_sites.append((s["name"], pid))
+            hostname = urlparse(s["url"]).hostname if s.get("url") else None
+            ga_sites.append((s["name"], pid, hostname))
 
     if not ga_sites:
         console.print("[yellow]No sites with ga_property_id in config.[/]")
         console.print("Add ga_property_id: \"XXXXXXX\" to a site in config.yaml")
         return
 
-    for name, property_id in ga_sites:
-        console.print(f"\n[bold]Google Analytics — {name}[/] (last {days} days)\n")
+    # Check if any property has multiple sites — if so, we need host filtering
+    from collections import Counter
+    pid_counts = Counter(pid for _, pid, _ in ga_sites)
+    needs_filter = {pid for pid, cnt in pid_counts.items() if cnt > 1}
+
+    for name, property_id, hostname in ga_sites:
+        # Only filter by hostname when property is shared between multiple sites
+        host = hostname if property_id in needs_filter else None
+        label = f"{name} ({hostname})" if host else name
+        console.print(f"\n[bold]Google Analytics — {label}[/] (last {days} days)\n")
 
         # Overview
         try:
-            ov = get_overview(sa, property_id, days)
+            ov = get_overview(sa, property_id, days, hostname=host)
             if ov:
                 engage_pct = int(ov["engaged_sessions"] / max(ov["sessions"], 1) * 100)
                 bounce_pct = int(ov["bounce_rate"] * 100)
@@ -1702,12 +1713,15 @@ def ga(days, site):
                 table.add_row("Bounce Rate", f"{bounce_pct}%")
                 table.add_row("Engaged", f"{ov['engaged_sessions']:,} ({engage_pct}%)")
                 console.print(table)
+            else:
+                console.print("  [dim]No data[/]")
+                continue
         except Exception as e:
             console.print(f"  [red]Overview error:[/] {e}")
 
         # Top pages
         try:
-            pages = get_top_pages(sa, property_id, days, limit=12)
+            pages = get_top_pages(sa, property_id, days, limit=12, hostname=host)
             if pages:
                 ptable = Table(title="Top Pages", box=box.SIMPLE)
                 ptable.add_column("Path", min_width=30)
@@ -1732,7 +1746,7 @@ def ga(days, site):
 
         # Channels
         try:
-            channels = get_channels(sa, property_id, days)
+            channels = get_channels(sa, property_id, days, hostname=host)
             if channels:
                 ctable = Table(title="Traffic Channels", box=box.SIMPLE)
                 ctable.add_column("Channel", min_width=18)
@@ -1752,7 +1766,7 @@ def ga(days, site):
 
         # Sources
         try:
-            sources = get_sources(sa, property_id, days, limit=10)
+            sources = get_sources(sa, property_id, days, limit=10, hostname=host)
             if sources:
                 stable = Table(title="Top Sources", box=box.SIMPLE)
                 stable.add_column("Source / Medium", min_width=25)
@@ -1771,7 +1785,7 @@ def ga(days, site):
 
         # Countries
         try:
-            countries = get_countries(sa, property_id, days, limit=10)
+            countries = get_countries(sa, property_id, days, limit=10, hostname=host)
             if countries:
                 cntable = Table(title="Top Countries", box=box.SIMPLE)
                 cntable.add_column("Country", min_width=15)
