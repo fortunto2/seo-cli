@@ -1377,6 +1377,7 @@ def traffic(days):
         return
 
     zone_map = {z["name"]: z["id"] for z in zones}
+    zone_plans = {z["name"]: z.get("plan", "Free") for z in zones}
 
     console.print(f"\n[bold]Cloudflare Traffic[/] ({start} — {end})\n")
 
@@ -1404,7 +1405,7 @@ def traffic(days):
         if not zone_id:
             summary.add_row(s["name"], "[dim]not in CF[/]", "", "", "", "", "", "")
             continue
-        is_subdomain = len(domain.split(".")) > 2
+        zone_plan = zone_plans.get(domain, "Free")
 
         try:
             analytics = get_zone_analytics(token, zone_id, start, end)
@@ -1418,19 +1419,26 @@ def traffic(days):
         total_bytes = sum(d["sum"]["bytes"] for d in analytics)
         total_threats = sum(d["sum"]["threats"] for d in analytics)
 
-        # Bot vs human split
-        try:
-            bot_split = get_bot_human_split(token, zone_id, dt_start, dt_end)
-            human_req = bot_split["human"]
-            bot_req = bot_split["bot"] + bot_split.get("likely_bot", 0)
-            verified_req = bot_split.get("verified_bot", 0)
-            human_str = f"{human_req:,}"
-            bot_str = f"{bot_req:,}"
-            verified_str = f"{verified_req:,}" if verified_req else "-"
-        except Exception:
-            human_str = "?"
-            bot_str = "?"
-            verified_str = "?"
+        # Bot vs human split (only reliable on Enterprise with Bot Management)
+        has_bot_mgmt = "enterprise" in zone_plan.lower()
+        if has_bot_mgmt:
+            try:
+                bot_split = get_bot_human_split(token, zone_id, dt_start, dt_end)
+                human_req = bot_split["human"]
+                bot_req = bot_split["bot"] + bot_split.get("likely_bot", 0)
+                verified_req = bot_split.get("verified_bot", 0)
+                human_str = f"{human_req:,}"
+                bot_str = f"{bot_req:,}"
+                verified_str = f"{verified_req:,}" if verified_req else "-"
+            except Exception:
+                human_str = "?"
+                bot_str = "?"
+                verified_str = "?"
+        else:
+            # Free/Pro/Business — no reliable bot classification
+            human_str = "[dim]-[/]"
+            bot_str = "[dim]-[/]"
+            verified_str = "[dim]-[/]"
 
         # Format bandwidth
         if total_bytes >= 1_000_000_000:

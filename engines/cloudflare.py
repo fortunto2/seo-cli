@@ -46,11 +46,17 @@ def _headers(token: str) -> dict:
 
 
 def list_zones(token: str) -> list[dict]:
-    """List all Cloudflare zones (sites)."""
+    """List all Cloudflare zones (sites) with plan info."""
     resp = requests.get(ZONES_URL, headers=_headers(token), params={"per_page": 50}, timeout=30)
     resp.raise_for_status()
     data = resp.json()
-    return [{"id": z["id"], "name": z["name"], "status": z["status"]} for z in data.get("result", [])]
+    return [
+        {
+            "id": z["id"], "name": z["name"], "status": z["status"],
+            "plan": z.get("plan", {}).get("name", "Free"),
+        }
+        for z in data.get("result", [])
+    ]
 
 
 def get_zone_analytics(token: str, zone_id: str, date_from: str, date_to: str) -> list[dict]:
