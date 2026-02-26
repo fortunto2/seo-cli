@@ -1,10 +1,14 @@
-"""Page SEO + GEO audit — check meta tags, OG, schema, AI readiness, speed, keywords."""
+"""Page SEO + GEO audit — check meta tags, OG, schema, AI readiness, speed, keywords, readability."""
 
 import requests
 import re
 import json
 from collections import Counter
 from urllib.parse import urlparse, urljoin
+
+import trafilatura
+import yake
+import textstat
 
 
 def _fetch(url: str, timeout: int = 15) -> requests.Response | None:
@@ -57,7 +61,7 @@ def _check_exists(url: str) -> tuple[bool, int]:
     return resp.status_code == 200, resp.status_code
 
 
-def audit_url(url: str) -> dict:
+def audit_url(url: str, skip_speed: bool = False) -> dict:
     """Full SEO + GEO audit of a URL."""
     parsed = urlparse(url)
     base = f"{parsed.scheme}://{parsed.netloc}"
@@ -200,93 +204,80 @@ def audit_url(url: str) -> dict:
         "Add FAQ/Article/Product schema for AI citations" if not ai_schemas else "")
 
     # ─── Page Speed (Google PageSpeed Insights API) ──────────────
-    results["speed"] = _check_pagespeed(url)
+    results["speed"] = _check_pagespeed(url) if not skip_speed else {}
 
-    # ─── Keywords ────────────────────────────────────────────────
-    results["keywords"] = _extract_keywords(html, title, desc, h1)
+    # ─── Content Analysis (trafilatura + yake + textstat) ───────
+    results["content"] = _analyze_content(html, title, desc, h1)
 
     return results
 
 
-# ─── Helpers ─────────────────────────────────────────────────────────
+# ─── Content Analysis Helpers ────────────────────────────────────────
 
 
-STOP_WORDS = {
-    "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
-    "of", "with", "by", "from", "is", "it", "this", "that", "are", "was",
-    "be", "have", "has", "had", "do", "does", "did", "will", "would",
-    "could", "should", "may", "might", "can", "not", "no", "so", "if",
-    "as", "than", "then", "just", "also", "how", "all", "each", "every",
-    "your", "our", "their", "its", "my", "his", "her", "we", "you", "they",
-    "i", "me", "he", "she", "us", "them", "who", "what", "which", "when",
-    "where", "why", "more", "most", "some", "any", "new", "get", "make",
-    "about", "up", "out", "one", "two", "been", "into", "over", "only",
-    # Russian
-    "и", "в", "на", "с", "для", "что", "это", "как", "по", "из", "не",
-    "от", "за", "все", "или", "но", "его", "она", "они", "мы", "вы",
-    "он", "её", "их", "вас", "нас", "так", "уже", "при", "до", "без",
-}
+def _analyze_content(html: str, title: str, desc: str, h1: str) -> dict:
+    """Full content analysis: keywords (yake), readability (textstat), density."""
+    # Extract clean text via trafilatura (much better than regex)
+    body_text = trafilatura.extract(html, include_comments=False, include_tables=True) or ""
+    if not body_text:
+        return {"keywords": [], "readability": {}, "word_count": 0}
 
+    word_count = len(body_text.split())
 
-def _extract_text(html: str) -> str:
-    """Strip tags, scripts, styles from HTML to get visible text."""
-    text = re.sub(r'<script[^>]*>.*?</script>', ' ', html, flags=re.S | re.I)
-    text = re.sub(r'<style[^>]*>.*?</style>', ' ', text, flags=re.S | re.I)
-    text = re.sub(r'<[^>]+>', ' ', text)
-    text = re.sub(r'&\w+;', ' ', text)
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip()
+    # ── YAKE keyword extraction ──
+    # Detect language hint from content
+    lang = "en"
+    if re.search(r'[а-яА-ЯёЁ]{3,}', body_text):
+        lang = "ru"
 
-
-def _tokenize(text: str) -> list[str]:
-    """Extract lowercase words, filter stop words and short tokens."""
-    words = re.findall(r'[a-zA-Zа-яА-ЯёЁ]{3,}', text.lower())
-    return [w for w in words if w not in STOP_WORDS]
-
-
-def _extract_keywords(html: str, title: str, desc: str, h1: str) -> dict:
-    """Analyze page keywords: density, title/h1/desc presence."""
-    body_text = _extract_text(html)
-    words = _tokenize(body_text)
-
-    if not words:
-        return {"top_words": [], "top_bigrams": [], "in_title": [], "in_h1": [], "in_desc": []}
-
-    # Single words
-    word_counts = Counter(words)
-    total = len(words)
-    top_words = []
-    for word, count in word_counts.most_common(15):
-        top_words.append({
-            "word": word, "count": count,
-            "density": round(count / total * 100, 1),
-        })
-
-    # Bigrams (2-word phrases)
-    bigrams = [f"{words[i]} {words[i+1]}" for i in range(len(words) - 1)]
-    bigram_counts = Counter(bigrams)
-    top_bigrams = []
-    for bg, count in bigram_counts.most_common(10):
-        if count >= 2:
-            top_bigrams.append({"phrase": bg, "count": count})
-
-    # Check top keywords presence in title, h1, description
+    kw_extractor = yake.KeywordExtractor(lan=lang, n=3, top=20, dedupLim=0.7)
+    yake_kws = kw_extractor.extract_keywords(body_text)
+    # yake returns (keyword, score) — lower score = more relevant
+    keywords = []
     title_lower = title.lower()
     h1_lower = h1.lower()
     desc_lower = desc.lower()
 
-    top_kw = [w["word"] for w in top_words[:10]]
-    in_title = [w for w in top_kw if w in title_lower]
-    in_h1 = [w for w in top_kw if w in h1_lower]
-    in_desc = [w for w in top_kw if w in desc_lower]
+    for kw, score in yake_kws[:15]:
+        kw_lower = kw.lower()
+        keywords.append({
+            "keyword": kw,
+            "score": round(score, 4),
+            "in_title": kw_lower in title_lower,
+            "in_h1": kw_lower in h1_lower,
+            "in_desc": kw_lower in desc_lower,
+        })
+
+    # ── Readability (textstat) ──
+    readability = {}
+    try:
+        if lang == "en":
+            readability = {
+                "flesch_ease": textstat.flesch_reading_ease(body_text),
+                "flesch_grade": textstat.flesch_kincaid_grade(body_text),
+                "gunning_fog": textstat.gunning_fog(body_text),
+                "reading_time_sec": textstat.reading_time(body_text, ms_per_char=14.69),
+            }
+        else:
+            # textstat supports russian for some metrics
+            readability = {
+                "reading_time_sec": textstat.reading_time(body_text, ms_per_char=14.69),
+            }
+    except Exception:
+        pass
+
+    # ── Word frequency (simple density) ──
+    words = re.findall(r'[a-zA-Zа-яА-ЯёЁ]{3,}', body_text.lower())
+    total = len(words)
+    word_freq = Counter(words).most_common(10)
+    density = [{"word": w, "count": c, "density": round(c / total * 100, 1)} for w, c in word_freq] if total else []
 
     return {
-        "top_words": top_words,
-        "top_bigrams": top_bigrams,
-        "in_title": in_title,
-        "in_h1": in_h1,
-        "in_desc": in_desc,
-        "total_words": total,
+        "keywords": keywords,
+        "readability": readability,
+        "word_count": word_count,
+        "density": density,
+        "lang": lang,
     }
 
 

@@ -459,104 +459,184 @@ def audit(url):
     from engines.audit import audit_url
 
     urls = [url] if url else [s["url"] for s in cfg.get("sites", [])]
+    multi = len(urls) > 1
 
+    all_results = []
     for target in urls:
-        result = audit_url(target)
-        score = result["score"]
-        max_score = result["max_score"]
-        pct = int(score / max_score * 100) if max_score else 0
-        color = "green" if pct >= 80 else ("yellow" if pct >= 60 else "red")
+        console.print(f"  [dim]Auditing {target}...[/]") if multi else None
+        result = audit_url(target, skip_speed=multi)
+        all_results.append(result)
 
-        console.print(Panel(f"[bold]{target}[/]  —  [{color}]{score}/{max_score} ({pct}%)[/]", title="SEO+GEO Audit", style=color))
+    # ─── Summary table (multi-site) ──────────────────────────────
+    if multi:
+        cat_order = ["seo", "og", "schema", "tech", "files", "geo"]
+        cat_labels = {"seo": "SEO", "og": "OG", "schema": "Schema", "tech": "Tech", "files": "Files", "geo": "GEO"}
 
-        categories = {}
-        for c in result["checks"]:
-            cat = c["category"]
-            if cat not in categories:
-                categories[cat] = []
-            categories[cat].append(c)
+        summary = Table(title="Audit Summary — All Sites", box=box.ROUNDED, padding=(0, 1))
+        summary.add_column("Site", style="bold", min_width=14)
+        for cat in cat_order:
+            summary.add_column(cat_labels[cat], justify="center", min_width=6)
+        summary.add_column("Total", justify="center", style="bold", min_width=7)
+        summary.add_column("Score", justify="center", min_width=5)
 
-        labels = {"seo": "SEO Basics", "og": "Open Graph / Social", "schema": "Structured Data",
-                  "tech": "Technical", "files": "Files", "geo": "GEO (AI Optimization)"}
+        all_actions = []
 
-        for cat, items in categories.items():
-            table = Table(title=labels.get(cat, cat), box=box.SIMPLE, show_header=False)
-            table.add_column("Status", width=3)
-            table.add_column("Check", min_width=25)
-            table.add_column("Value")
-            for c in items:
-                icon = "[green]+[/]" if c["ok"] else "[red]x[/]"
-                val = c["value"] if c["ok"] else (c["hint"] or c["value"])
-                table.add_row(icon, c["name"], val)
-            console.print(table)
+        for result in all_results:
+            # Group checks by category
+            cat_scores = {}
+            for c in result["checks"]:
+                cat = c["category"]
+                if cat not in cat_scores:
+                    cat_scores[cat] = {"ok": 0, "total": 0}
+                cat_scores[cat]["total"] += 1
+                if c["ok"]:
+                    cat_scores[cat]["ok"] += 1
 
-        # Page Speed
-        speed = result.get("speed", {})
-        for strategy in ("mobile", "desktop"):
-            sdata = speed.get(strategy, {})
-            scores = sdata.get("scores", {})
-            cwv = sdata.get("cwv", {})
-            if not scores:
-                continue
+            row = [result["url"].replace("https://", "")]
+            for cat in cat_order:
+                s = cat_scores.get(cat, {"ok": 0, "total": 0})
+                color = "green" if s["ok"] == s["total"] else ("yellow" if s["ok"] / max(s["total"], 1) >= 0.5 else "red")
+                row.append(f"[{color}]{s['ok']}/{s['total']}[/]")
 
-            table = Table(title=f"PageSpeed — {strategy.title()}", box=box.SIMPLE, show_header=False)
-            table.add_column("Metric", min_width=20)
-            table.add_column("Value", justify="right")
+            pct = int(result["score"] / result["max_score"] * 100) if result["max_score"] else 0
+            color = "green" if pct >= 80 else ("yellow" if pct >= 60 else "red")
+            row.append(f"{result['score']}/{result['max_score']}")
+            row.append(f"[{color}]{pct}%[/]")
+            summary.add_row(*row)
 
-            for cat_id, score_val in scores.items():
-                sc = "green" if score_val >= 90 else ("yellow" if score_val >= 50 else "red")
-                table.add_row(cat_id.replace("-", " ").title(), f"[{sc}]{score_val}[/]")
+            # Collect action items
+            fails = [c for c in result["checks"] if not c["ok"] and c["hint"]]
+            if fails:
+                site_name = result["url"].replace("https://", "")
+                for c in fails:
+                    all_actions.append((site_name, c["category"], c["hint"]))
 
-            for label, info in cwv.items():
-                val = info["value"]
-                rating = info["rating"]
-                rc = "green" if rating == "FAST" else ("yellow" if rating == "AVERAGE" else "red")
-                unit = "ms" if label != "CLS" else ""
-                display = f"{val/1000:.2f}" if label == "CLS" else f"{val:,}{unit}"
-                table.add_row(f"{label}", f"[{rc}]{display}[/] ({rating})")
+        console.print(summary)
 
-            console.print(table)
+        # Action items per site
+        if all_actions:
+            actions_table = Table(title="Action Items", box=box.SIMPLE)
+            actions_table.add_column("Site", style="cyan", min_width=14)
+            actions_table.add_column("Cat", min_width=6)
+            actions_table.add_column("Issue")
+            for site, cat, hint in all_actions:
+                actions_table.add_row(site, cat.upper(), hint)
+            console.print(actions_table)
 
-        # Keywords
-        kw = result.get("keywords", {})
-        if kw.get("top_words"):
-            table = Table(title=f"Keywords ({kw.get('total_words', 0)} words)", box=box.SIMPLE)
-            table.add_column("Word")
-            table.add_column("Count", justify="right")
-            table.add_column("Density", justify="right")
-            table.add_column("In Title", justify="center")
-            table.add_column("In H1", justify="center")
-            table.add_column("In Desc", justify="center")
-
-            in_title = set(kw.get("in_title", []))
-            in_h1 = set(kw.get("in_h1", []))
-            in_desc = set(kw.get("in_desc", []))
-
-            for w in kw["top_words"][:10]:
-                word = w["word"]
-                table.add_row(
-                    word, str(w["count"]), f"{w['density']}%",
-                    "[green]+[/]" if word in in_title else "[dim]-[/]",
-                    "[green]+[/]" if word in in_h1 else "[dim]-[/]",
-                    "[green]+[/]" if word in in_desc else "[dim]-[/]",
-                )
-            console.print(table)
-
-        if kw.get("top_bigrams"):
-            table = Table(title="Top Phrases", box=box.SIMPLE)
-            table.add_column("Phrase")
-            table.add_column("Count", justify="right")
-            for bg in kw["top_bigrams"][:7]:
-                table.add_row(bg["phrase"], str(bg["count"]))
-            console.print(table)
-
-        # Action items
-        fails = [c for c in result["checks"] if not c["ok"] and c["hint"]]
-        if fails:
-            console.print("[bold yellow]Action Items:[/]")
-            for i, c in enumerate(fails, 1):
-                console.print(f"  {i}. {c['hint']}")
         console.print()
+        return
+
+    # ─── Detailed view (single URL) ─────────────────────────────
+    result = all_results[0]
+    score = result["score"]
+    max_score = result["max_score"]
+    pct = int(score / max_score * 100) if max_score else 0
+    color = "green" if pct >= 80 else ("yellow" if pct >= 60 else "red")
+
+    console.print(Panel(f"[bold]{urls[0]}[/]  —  [{color}]{score}/{max_score} ({pct}%)[/]", title="SEO+GEO Audit", style=color))
+
+    categories = {}
+    for c in result["checks"]:
+        cat = c["category"]
+        if cat not in categories:
+            categories[cat] = []
+        categories[cat].append(c)
+
+    labels = {"seo": "SEO Basics", "og": "Open Graph / Social", "schema": "Structured Data",
+              "tech": "Technical", "files": "Files", "geo": "GEO (AI Optimization)"}
+
+    for cat, items in categories.items():
+        table = Table(title=labels.get(cat, cat), box=box.SIMPLE, show_header=False)
+        table.add_column("Status", width=3)
+        table.add_column("Check", min_width=25)
+        table.add_column("Value")
+        for c in items:
+            icon = "[green]+[/]" if c["ok"] else "[red]x[/]"
+            val = c["value"] if c["ok"] else (c["hint"] or c["value"])
+            table.add_row(icon, c["name"], val)
+        console.print(table)
+
+    # Page Speed
+    speed = result.get("speed", {})
+    for strategy in ("mobile", "desktop"):
+        sdata = speed.get(strategy, {})
+        scores = sdata.get("scores", {})
+        cwv = sdata.get("cwv", {})
+        if not scores:
+            continue
+
+        table = Table(title=f"PageSpeed — {strategy.title()}", box=box.SIMPLE, show_header=False)
+        table.add_column("Metric", min_width=20)
+        table.add_column("Value", justify="right")
+
+        for cat_id, score_val in scores.items():
+            sc = "green" if score_val >= 90 else ("yellow" if score_val >= 50 else "red")
+            table.add_row(cat_id.replace("-", " ").title(), f"[{sc}]{score_val}[/]")
+
+        for label, info in cwv.items():
+            val = info["value"]
+            rating = info["rating"]
+            rc = "green" if rating == "FAST" else ("yellow" if rating == "AVERAGE" else "red")
+            unit = "ms" if label != "CLS" else ""
+            display = f"{val/1000:.2f}" if label == "CLS" else f"{val:,}{unit}"
+            table.add_row(f"{label}", f"[{rc}]{display}[/] ({rating})")
+
+        console.print(table)
+
+    # Content Analysis (keywords, readability, density)
+    content = result.get("content", {})
+    if content.get("keywords"):
+        table = Table(title=f"Keywords — YAKE ({content.get('word_count', 0)} words, {content.get('lang', '?')})", box=box.SIMPLE)
+        table.add_column("Keyword")
+        table.add_column("Score", justify="right")
+        table.add_column("In Title", justify="center")
+        table.add_column("In H1", justify="center")
+        table.add_column("In Desc", justify="center")
+
+        for kw in content["keywords"][:12]:
+            table.add_row(
+                kw["keyword"], str(kw["score"]),
+                "[green]+[/]" if kw["in_title"] else "[dim]-[/]",
+                "[green]+[/]" if kw["in_h1"] else "[dim]-[/]",
+                "[green]+[/]" if kw["in_desc"] else "[dim]-[/]",
+            )
+        console.print(table)
+
+    if content.get("density"):
+        table = Table(title="Word Density", box=box.SIMPLE)
+        table.add_column("Word")
+        table.add_column("Count", justify="right")
+        table.add_column("Density", justify="right")
+        for d in content["density"][:10]:
+            table.add_row(d["word"], str(d["count"]), f"{d['density']}%")
+        console.print(table)
+
+    readability = content.get("readability", {})
+    if readability:
+        table = Table(title="Readability", box=box.SIMPLE, show_header=False)
+        table.add_column("Metric", min_width=20)
+        table.add_column("Value", justify="right")
+        if "flesch_ease" in readability:
+            fe = readability["flesch_ease"]
+            color = "green" if fe >= 60 else ("yellow" if fe >= 30 else "red")
+            label = "Easy" if fe >= 60 else ("Standard" if fe >= 30 else "Hard")
+            table.add_row("Flesch Reading Ease", f"[{color}]{fe:.0f}[/] ({label})")
+        if "flesch_grade" in readability:
+            table.add_row("Flesch-Kincaid Grade", f"{readability['flesch_grade']:.1f}")
+        if "gunning_fog" in readability:
+            table.add_row("Gunning Fog Index", f"{readability['gunning_fog']:.1f}")
+        if "reading_time_sec" in readability:
+            rt = readability["reading_time_sec"]
+            table.add_row("Reading Time", f"{rt:.0f}s" if rt < 60 else f"{rt/60:.1f}min")
+        console.print(table)
+
+    # Action items
+    fails = [c for c in result["checks"] if not c["ok"] and c["hint"]]
+    if fails:
+        console.print("[bold yellow]Action Items:[/]")
+        for i, c in enumerate(fails, 1):
+            console.print(f"  {i}. {c['hint']}")
+    console.print()
 
 
 def main():
