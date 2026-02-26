@@ -1,0 +1,7 @@
+config.yaml
+*.json
+!config.example.yaml
+__pycache__/
+.venv/
+.claude/settings.local.json
+uv.lock

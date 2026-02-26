@@ -1,0 +1,14 @@
+[project]
+name = "seo-cli"
+version = "0.1.0"
+description = "Unified search engine management CLI for all your sites"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+    "pyyaml>=6.0",
+    "google-api-python-client>=2.100",
+    "google-auth>=2.23",
+]
+
+[project.scripts]
+seo = "cli:main"

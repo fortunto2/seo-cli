@@ -1,0 +1,44 @@
+# SEO CLI — Configuration
+# Copy to config.yaml and fill in your credentials
+
+google:
+  # Create service account: https://console.cloud.google.com/iam-admin/serviceaccounts
+  # Enable Search Console API: https://console.cloud.google.com/apis/library/searchconsole.googleapis.com
+  # Add service account email as Owner in Search Console: Settings > Users
+  service_account_file: "/path/to/service-account.json"
+
+bing:
+  # Get API key: https://www.bing.com/webmasters > Settings > API access
+  api_key: ""
+
+yandex:
+  # 1. Create app: https://oauth.yandex.com/client/new
+  #    - Set redirect URI: https://oauth.yandex.com/verification_code
+  #    - Request scopes: webmaster:verify, webmaster:manage
+  # 2. Get token: https://oauth.yandex.com/authorize?response_type=token&client_id=YOUR_CLIENT_ID
+  #    - Authorize and copy token from URL
+  oauth_token: ""
+
+indexnow:
+  # Any random hex string (16+ chars). Run: python -c "import secrets; print(secrets.token_hex(16))"
+  # IMPORTANT: You must also place a file named {key}.txt at each site's root
+  key: ""
+
+# All your sites
+sites:
+  - url: "https://face-alarm.com"
+    sitemap: "https://face-alarm.com/sitemap.xml"
+    name: "FaceAlarm"
+
+  - url: "https://life2.film"
+    sitemap: "https://life2.film/sitemap.xml"
+    name: "Life2Film"
+
+  - url: "https://you2idea.com"
+    sitemap: "https://you2idea.com/sitemap.xml"
+    name: "You2Idea"
+
+  # Add more sites here:
+  # - url: "https://example.com"
+  #   sitemap: "https://example.com/sitemap.xml"
+  #   name: "Example"
