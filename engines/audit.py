@@ -203,6 +203,58 @@ def audit_url(url: str, skip_speed: bool = False) -> dict:
     add("geo", "Rich schema", len(ai_schemas) > 0, ", ".join(ai_schemas) if ai_schemas else "",
         "Add FAQ/Article/Product schema for AI citations" if not ai_schemas else "")
 
+    # ─── Links & Images ────────────────────────────────────────────
+
+    # Broken internal links checker
+    all_links = re.findall(r'<a\s[^>]*href="([^"]*)"', html, re.I)
+    internal_links = []
+    for href in all_links:
+        # Skip anchors, mailto, tel, javascript
+        if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        # Resolve relative URLs
+        if href.startswith("/") or not href.startswith("http"):
+            full = urljoin(url, href)
+        else:
+            full = href
+        # Keep only same-domain links
+        link_parsed = urlparse(full)
+        if link_parsed.netloc == parsed.netloc:
+            internal_links.append(full)
+
+    # Deduplicate and check up to 20 links with HEAD requests
+    unique_internal = list(dict.fromkeys(internal_links))[:20]
+    broken_links = []
+    for link in unique_internal:
+        try:
+            r = requests.head(link, timeout=5, headers={
+                "User-Agent": "Mozilla/5.0 (compatible; SEO-CLI/1.0)"
+            }, allow_redirects=True)
+            if r.status_code in (404, 500):
+                broken_links.append(f"{link} ({r.status_code})")
+        except Exception:
+            broken_links.append(f"{link} (error)")
+
+    broken_detail = f"{len(broken_links)} broken" if broken_links else "All OK"
+    if broken_links:
+        broken_detail += ": " + ", ".join(broken_links[:5])
+    add("links", "Internal links", not broken_links, broken_detail,
+        f"Fix {len(broken_links)} broken internal link(s)" if broken_links else "")
+
+    # Images without alt attribute
+    img_tags = re.findall(r'<img\s[^>]*?/?>', html, re.I)
+    total_images = len(img_tags)
+    missing_alt = 0
+    for img in img_tags:
+        if 'alt=' not in img.lower():
+            missing_alt += 1
+        elif re.search(r'alt="\s*"', img, re.I):
+            missing_alt += 1
+    all_have_alt = missing_alt == 0
+    alt_value = f"{missing_alt}/{total_images} missing" if total_images else "No images found"
+    add("links", "Image alt tags", all_have_alt, alt_value,
+        f"Add alt text to {missing_alt} image(s)" if missing_alt else "")
+
     # ─── Page Speed (Google PageSpeed Insights API) ──────────────
     results["speed"] = _check_pagespeed(url) if not skip_speed else {}
 
@@ -345,7 +397,8 @@ def format_report(audit: dict) -> str:
         categories[cat].append(c)
 
     labels = {"seo": "SEO Basics", "og": "Open Graph / Social", "schema": "Structured Data",
-              "tech": "Technical", "files": "Files", "geo": "GEO (AI Optimization)"}
+              "tech": "Technical", "files": "Files", "geo": "GEO (AI Optimization)",
+              "links": "Links & Images"}
 
     for cat, items in categories.items():
         lines.append(f"\n  --- {labels.get(cat, cat)} ---")

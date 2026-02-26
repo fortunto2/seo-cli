@@ -356,18 +356,50 @@ def reindex(url):
                 console.print(f"  [red]x[/] IndexNow — {e}")
 
 
+def _fmt_delta_pct(current: float, previous: float) -> str:
+    """Format a percentage delta with color: green for growth, red for decline."""
+    if previous == 0:
+        return "[dim]--[/]"
+    pct = (current - previous) / previous * 100
+    sign = "+" if pct >= 0 else ""
+    color = "green" if pct >= 0 else "red"
+    return f"[{color}]{sign}{pct:.0f}%[/]"
+
+
+def _fmt_delta_pos(current: float, previous: float) -> str:
+    """Format position delta with color: green if position improved (decreased), red if worse."""
+    delta = current - previous
+    if abs(delta) < 0.05:
+        return "[dim]0.0[/]"
+    sign = "+" if delta > 0 else ""
+    # Lower position number = better, so negative delta = improvement = green
+    color = "green" if delta < 0 else "red"
+    return f"[{color}]{sign}{delta:.1f}[/]"
+
+
 @cli.command()
 def report():
     """Full SEO report across all sites."""
     cfg = load_config()
     sites = cfg.get("sites", [])
+
+    # Current period: last 28 days
     end = date.today().isoformat()
     start = (date.today() - timedelta(days=28)).isoformat()
 
-    console.print(Panel(f"SEO REPORT — {start} to {end}", style="bold blue"))
+    # Previous period: 28 days before the current period
+    prev_end = (date.today() - timedelta(days=28)).isoformat()
+    prev_start = (date.today() - timedelta(days=56)).isoformat()
+
+    console.print(Panel(
+        f"SEO REPORT — {start} to {end}  (vs {prev_start} to {prev_end})",
+        style="bold blue",
+    ))
 
     total_clicks = 0
     total_impressions = 0
+    prev_total_clicks = 0
+    prev_total_impressions = 0
     all_opportunities = []
 
     if _has_google(cfg):
@@ -383,6 +415,7 @@ def report():
                 continue
 
             try:
+                # Fetch current period
                 data = get_search_analytics(sa, gsc_url, start, end)
                 rows = data.get("rows", [])
                 clicks = sum(r.get("clicks", 0) for r in rows)
@@ -391,8 +424,26 @@ def report():
                 total_impressions += impressions
                 avg_pos = sum(r["position"] * r["impressions"] for r in rows) / max(impressions, 1) if rows else 0
 
+                # Fetch previous period
+                prev_data = get_search_analytics(sa, gsc_url, prev_start, prev_end)
+                prev_rows = prev_data.get("rows", [])
+                prev_clicks = sum(r.get("clicks", 0) for r in prev_rows)
+                prev_impressions = sum(r.get("impressions", 0) for r in prev_rows)
+                prev_total_clicks += prev_clicks
+                prev_total_impressions += prev_impressions
+                prev_avg_pos = sum(r["position"] * r["impressions"] for r in prev_rows) / max(prev_impressions, 1) if prev_rows else 0
+
+                # Format deltas
+                clicks_delta = _fmt_delta_pct(clicks, prev_clicks)
+                imp_delta = _fmt_delta_pct(impressions, prev_impressions)
+                pos_delta = _fmt_delta_pos(avg_pos, prev_avg_pos)
+
                 color = "green" if clicks > 0 else "dim"
-                console.print(f"\n  [{color}]{name}[/] — [bold]{clicks:,}[/] clicks | {impressions:,} imp | avg pos {avg_pos:.1f}")
+                console.print(
+                    f"\n  [{color}]{name}[/] — [bold]{clicks:,}[/] clicks ({clicks_delta})"
+                    f" | {impressions:,} imp ({imp_delta})"
+                    f" | avg pos {avg_pos:.1f} ({pos_delta})"
+                )
 
                 if rows:
                     for r in sorted(rows, key=lambda x: x["clicks"], reverse=True)[:3]:
@@ -435,8 +486,14 @@ def report():
             except Exception:
                 console.print(f"    [red]x[/] {s['name']} (unreachable)")
 
-    # Totals
-    console.print(Panel(f"TOTALS: [bold green]{total_clicks:,}[/] clicks | [bold]{total_impressions:,}[/] impressions", style="blue"))
+    # Totals with period-over-period comparison
+    clicks_vs = _fmt_delta_pct(total_clicks, prev_total_clicks)
+    imp_vs = _fmt_delta_pct(total_impressions, prev_total_impressions)
+    console.print(Panel(
+        f"TOTALS: [bold green]{total_clicks:,}[/] clicks ({clicks_vs} vs prev)"
+        f" | [bold]{total_impressions:,}[/] impressions ({imp_vs} vs prev)",
+        style="blue",
+    ))
 
     if all_opportunities:
         table = Table(title="Low-CTR Opportunities", box=box.SIMPLE)
@@ -469,8 +526,8 @@ def audit(url):
 
     # ─── Summary table (multi-site) ──────────────────────────────
     if multi:
-        cat_order = ["seo", "og", "schema", "tech", "files", "geo"]
-        cat_labels = {"seo": "SEO", "og": "OG", "schema": "Schema", "tech": "Tech", "files": "Files", "geo": "GEO"}
+        cat_order = ["seo", "og", "schema", "tech", "files", "geo", "links"]
+        cat_labels = {"seo": "SEO", "og": "OG", "schema": "Schema", "tech": "Tech", "files": "Files", "geo": "GEO", "links": "Links"}
 
         summary = Table(title="Audit Summary — All Sites", box=box.ROUNDED, padding=(0, 1))
         summary.add_column("Site", style="bold", min_width=14)
@@ -543,7 +600,8 @@ def audit(url):
         categories[cat].append(c)
 
     labels = {"seo": "SEO Basics", "og": "Open Graph / Social", "schema": "Structured Data",
-              "tech": "Technical", "files": "Files", "geo": "GEO (AI Optimization)"}
+              "tech": "Technical", "files": "Files", "geo": "GEO (AI Optimization)",
+              "links": "Links & Images"}
 
     for cat, items in categories.items():
         table = Table(title=labels.get(cat, cat), box=box.SIMPLE, show_header=False)
@@ -637,6 +695,45 @@ def audit(url):
         for i, c in enumerate(fails, 1):
             console.print(f"  {i}. {c['hint']}")
     console.print()
+
+
+@cli.command()
+@click.argument("query")
+@click.option("--lang", default="en", help="Language code (en, ru, etc.)")
+def keywords(query, lang):
+    """Get keyword ideas from Google Autocomplete."""
+    from engines.keywords import google_autocomplete, people_also_search
+
+    # Section 1: Direct autocomplete suggestions
+    console.print(f"\n[bold]Google Autocomplete[/] — \"{query}\" (lang={lang})\n")
+    suggestions = google_autocomplete(query, lang=lang)
+
+    if suggestions:
+        table = Table(title="Autocomplete Suggestions", box=box.SIMPLE)
+        table.add_column("#", justify="right", style="dim")
+        table.add_column("Suggestion")
+        for i, s in enumerate(suggestions, 1):
+            table.add_row(str(i), s)
+        console.print(table)
+    else:
+        console.print("  [dim]No autocomplete suggestions found.[/]")
+
+    # Section 2: People also search (question/comparison modifiers)
+    console.print()
+    also_search = people_also_search(query, lang=lang)
+
+    if also_search:
+        table = Table(title="People Also Search", box=box.SIMPLE)
+        table.add_column("#", justify="right", style="dim")
+        table.add_column("Keyword")
+        for i, s in enumerate(also_search, 1):
+            table.add_row(str(i), s)
+        console.print(table)
+    else:
+        console.print("  [dim]No 'people also search' suggestions found.[/]")
+
+    total = len(suggestions) + len(also_search)
+    console.print(f"\n  [bold]{total}[/] keyword ideas found.\n")
 
 
 def main():
