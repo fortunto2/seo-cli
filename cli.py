@@ -1532,7 +1532,7 @@ def traffic(days):
 @cli.command()
 @click.option("--days", default=7, help="Number of days to analyze")
 def crawlers(days):
-    """AI crawler analytics — who's crawling your sites (GEO insight)."""
+    """AI crawler analytics — who's crawling your sites, referrals, ROI."""
     cfg = load_config()
     if not _has_cloudflare(cfg):
         console.print("[red]Cloudflare not configured.[/] Add cloudflare.api_token to config.yaml")
@@ -1547,6 +1547,10 @@ def crawlers(days):
 
     end_dt = date.today().isoformat() + "T23:59:59Z"
     start_dt = (date.today() - timedelta(days=days)).isoformat() + "T00:00:00Z"
+
+    # Previous period for trend comparison
+    prev_end = (date.today() - timedelta(days=days)).isoformat() + "T23:59:59Z"
+    prev_start = (date.today() - timedelta(days=days * 2)).isoformat() + "T00:00:00Z"
 
     try:
         zones = list_zones(token)
@@ -1567,15 +1571,35 @@ def crawlers(days):
 
         console.print(f"  [dim]Scanning {s['name']}...[/]")
 
-        # AI crawler stats
+        # Current + previous period
         crawler_stats = get_ai_crawler_stats(token, zone_id, start_dt, end_dt)
+        prev_stats = get_ai_crawler_stats(token, zone_id, prev_start, prev_end)
+        prev_map = {c["crawler"]: c["requests"] for c in prev_stats}
+
+        # Referrals
+        referrals = get_ai_referral_traffic(token, zone_id, start_dt, end_dt)
+        ref_map = {r["referrer"]: r["requests"] for r in referrals}
 
         if crawler_stats:
-            table = Table(title=f"{s['name']} — AI Crawlers", box=box.ROUNDED)
-            table.add_column("Crawler", min_width=18)
-            table.add_column("Requests", justify="right", style="cyan")
+            total_crawls = sum(c["requests"] for c in crawler_stats)
+            total_ok = sum(c["ok"] for c in crawler_stats)
+            total_refs = sum(r["requests"] for r in referrals) if referrals else 0
+
+            # Summary line
+            console.print(f"\n  [bold]{s['name']}[/]: {total_crawls:,} AI crawls, "
+                          f"{total_ok:,} OK ({int(total_ok/max(total_crawls,1)*100)}%), "
+                          f"{total_refs:,} referrals")
+
+            # Main crawler table with all metrics
+            table = Table(title=f"AI Crawlers", box=box.ROUNDED)
+            table.add_column("Crawler", min_width=16)
+            table.add_column("Crawls", justify="right", style="cyan")
+            table.add_column("OK", justify="right", style="green")
+            table.add_column("Errors", justify="right", style="red")
             table.add_column("Bandwidth", justify="right")
-            table.add_column("Avg/day", justify="right", style="green")
+            table.add_column("Trend", justify="right")
+            table.add_column("Referrals", justify="right", style="magenta")
+            table.add_column("ROI", justify="right", style="bold")
 
             for c in crawler_stats:
                 bw = c["bytes"]
@@ -1585,18 +1609,59 @@ def crawlers(days):
                     bw_str = f"{bw / 1_000:.0f} KB"
                 else:
                     bw_str = f"{bw} B"
-                avg = c["requests"] // max(days, 1)
-                table.add_row(c["crawler"], f"{c['requests']:,}", bw_str, f"{avg:,}/day")
+
+                # Trend vs previous period
+                prev_req = prev_map.get(c["crawler"], 0)
+                if prev_req > 0:
+                    change = (c["requests"] - prev_req) / prev_req * 100
+                    tc = "green" if change > 0 else "red"
+                    trend_str = f"[{tc}]{'+' if change > 0 else ''}{change:.0f}%[/]"
+                else:
+                    trend_str = "[green]new[/]"
+
+                # Match crawler to referrer domain
+                ref_count = 0
+                crawler_lower = c["crawler"].lower()
+                for domain, count in ref_map.items():
+                    if ("openai" in crawler_lower or "chatgpt" in crawler_lower) and "chatgpt" in domain or "openai" in domain:
+                        ref_count = count
+                        break
+                    elif "claude" in crawler_lower and "claude" in domain:
+                        ref_count = count
+                        break
+                    elif "perplexity" in crawler_lower and "perplexity" in domain:
+                        ref_count = count
+                        break
+                    elif "google" in crawler_lower and "gemini" in domain:
+                        ref_count = count
+                        break
+                    elif "bing" in crawler_lower and "copilot" in domain:
+                        ref_count = count
+                        break
+
+                ref_str = f"{ref_count:,}" if ref_count else "-"
+
+                # ROI = referrals per 100 crawls
+                if ref_count and c["requests"]:
+                    roi = ref_count / c["requests"] * 100
+                    roi_str = f"{roi:.1f}%" if roi < 10 else f"{roi:.0f}%"
+                else:
+                    roi_str = "-"
+
+                table.add_row(
+                    c["crawler"], f"{c['requests']:,}",
+                    str(c["ok"]), str(c["errors"]),
+                    bw_str, trend_str, ref_str, roi_str,
+                )
 
             console.print(table)
         else:
             console.print(f"  [dim]{s['name']}: no AI crawler activity detected[/]")
 
-        # AI referral traffic
-        referrals = get_ai_referral_traffic(token, zone_id, start_dt, end_dt)
+        # Referral sources (show all, not just matched to crawlers)
         if referrals:
-            rtable = Table(title=f"{s['name']} — AI Referral Traffic", box=box.SIMPLE)
-            rtable.add_column("Source")
+            rtable = Table(title="AI Referral Traffic (visitors from AI)", box=box.SIMPLE)
+            rtable.add_column("Source", min_width=20)
             rtable.add_column("Visits", justify="right", style="green")
             for r in referrals:
                 rtable.add_row(r["referrer"], f"{r['requests']:,}")
@@ -1605,11 +1670,14 @@ def crawlers(days):
         # Top paths crawled by AI
         paths = get_ai_top_paths(token, zone_id, start_dt, end_dt)
         if paths:
-            ptable = Table(title=f"{s['name']} — Top AI-Crawled Paths", box=box.SIMPLE)
-            ptable.add_column("Path", min_width=30)
-            ptable.add_column("Requests", justify="right")
+            ptable = Table(title="Most Crawled Pages by AI", box=box.SIMPLE)
+            ptable.add_column("Path", min_width=35)
+            ptable.add_column("Crawls", justify="right", style="cyan")
+            ptable.add_column("% of total", justify="right", style="dim")
+            total_path_crawls = sum(p["requests"] for p in paths)
             for p in paths[:10]:
-                ptable.add_row(p["path"], f"{p['requests']:,}")
+                pct = p["requests"] / max(total_path_crawls, 1) * 100
+                ptable.add_row(p["path"][:50], f"{p['requests']:,}", f"{pct:.0f}%")
             console.print(ptable)
 
         console.print()

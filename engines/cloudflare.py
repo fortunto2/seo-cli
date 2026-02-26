@@ -273,18 +273,18 @@ def get_bot_human_split(token: str, zone_id: str, dt_from: str, dt_to: str) -> d
 
 
 def get_ai_crawler_stats(token: str, zone_id: str, dt_from: str, dt_to: str) -> list[dict]:
-    """Get AI crawler requests by user-agent pattern for a zone."""
+    """Get AI crawler requests with HTTP status breakdown per crawler."""
     results = []
     for ua_pattern, label in AI_CRAWLERS:
+        # Get total + status code breakdown in one query
         query = """
         {
           viewer {
             zones(filter: {zoneTag: "%s"}) {
-              httpRequestsAdaptiveGroups(
+              total: httpRequestsAdaptiveGroups(
                 filter: {
                   datetime_geq: "%s"
                   datetime_leq: "%s"
-                  requestSource: "eyeball"
                   userAgent_like: "%%%s%%"
                 }
                 limit: 1
@@ -292,10 +292,21 @@ def get_ai_crawler_stats(token: str, zone_id: str, dt_from: str, dt_to: str) -> 
                 count
                 sum { edgeResponseBytes }
               }
+              ok: httpRequestsAdaptiveGroups(
+                filter: {
+                  datetime_geq: "%s"
+                  datetime_leq: "%s"
+                  userAgent_like: "%%%s%%"
+                  edgeResponseStatus_geq: 200
+                  edgeResponseStatus_lt: 300
+                }
+                limit: 1
+              ) { count }
             }
           }
         }
-        """ % (zone_id, dt_from, dt_to, ua_pattern)
+        """ % (zone_id, dt_from, dt_to, ua_pattern,
+               dt_from, dt_to, ua_pattern)
 
         try:
             resp = requests.post(GRAPHQL_URL, headers=_headers(token), json={"query": query}, timeout=15)
@@ -303,14 +314,17 @@ def get_ai_crawler_stats(token: str, zone_id: str, dt_from: str, dt_to: str) -> 
             data = resp.json()
             zones = data.get("data", {}).get("viewer", {}).get("zones", [])
             if zones:
-                groups = zones[0].get("httpRequestsAdaptiveGroups", [])
-                total = sum(g["count"] for g in groups)
-                total_bytes = sum(g.get("sum", {}).get("edgeResponseBytes", 0) for g in groups)
+                z = zones[0]
+                total = sum(g["count"] for g in z.get("total", []))
+                total_bytes = sum(g.get("sum", {}).get("edgeResponseBytes", 0) for g in z.get("total", []))
+                ok = sum(g["count"] for g in z.get("ok", []))
                 if total > 0:
                     results.append({
                         "crawler": label,
                         "ua_pattern": ua_pattern,
                         "requests": total,
+                        "ok": ok,
+                        "errors": total - ok,
                         "bytes": total_bytes,
                     })
         except Exception:
