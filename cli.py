@@ -490,6 +490,66 @@ def audit(url):
                 table.add_row(icon, c["name"], val)
             console.print(table)
 
+        # Page Speed
+        speed = result.get("speed", {})
+        for strategy in ("mobile", "desktop"):
+            sdata = speed.get(strategy, {})
+            scores = sdata.get("scores", {})
+            cwv = sdata.get("cwv", {})
+            if not scores:
+                continue
+
+            table = Table(title=f"PageSpeed — {strategy.title()}", box=box.SIMPLE, show_header=False)
+            table.add_column("Metric", min_width=20)
+            table.add_column("Value", justify="right")
+
+            for cat_id, score_val in scores.items():
+                sc = "green" if score_val >= 90 else ("yellow" if score_val >= 50 else "red")
+                table.add_row(cat_id.replace("-", " ").title(), f"[{sc}]{score_val}[/]")
+
+            for label, info in cwv.items():
+                val = info["value"]
+                rating = info["rating"]
+                rc = "green" if rating == "FAST" else ("yellow" if rating == "AVERAGE" else "red")
+                unit = "ms" if label != "CLS" else ""
+                display = f"{val/1000:.2f}" if label == "CLS" else f"{val:,}{unit}"
+                table.add_row(f"{label}", f"[{rc}]{display}[/] ({rating})")
+
+            console.print(table)
+
+        # Keywords
+        kw = result.get("keywords", {})
+        if kw.get("top_words"):
+            table = Table(title=f"Keywords ({kw.get('total_words', 0)} words)", box=box.SIMPLE)
+            table.add_column("Word")
+            table.add_column("Count", justify="right")
+            table.add_column("Density", justify="right")
+            table.add_column("In Title", justify="center")
+            table.add_column("In H1", justify="center")
+            table.add_column("In Desc", justify="center")
+
+            in_title = set(kw.get("in_title", []))
+            in_h1 = set(kw.get("in_h1", []))
+            in_desc = set(kw.get("in_desc", []))
+
+            for w in kw["top_words"][:10]:
+                word = w["word"]
+                table.add_row(
+                    word, str(w["count"]), f"{w['density']}%",
+                    "[green]+[/]" if word in in_title else "[dim]-[/]",
+                    "[green]+[/]" if word in in_h1 else "[dim]-[/]",
+                    "[green]+[/]" if word in in_desc else "[dim]-[/]",
+                )
+            console.print(table)
+
+        if kw.get("top_bigrams"):
+            table = Table(title="Top Phrases", box=box.SIMPLE)
+            table.add_column("Phrase")
+            table.add_column("Count", justify="right")
+            for bg in kw["top_bigrams"][:7]:
+                table.add_row(bg["phrase"], str(bg["count"]))
+            console.print(table)
+
         # Action items
         fails = [c for c in result["checks"] if not c["ok"] and c["hint"]]
         if fails:

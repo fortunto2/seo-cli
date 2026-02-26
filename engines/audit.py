@@ -1,8 +1,9 @@
-"""Page SEO + GEO audit — check meta tags, OG, schema, AI readiness."""
+"""Page SEO + GEO audit — check meta tags, OG, schema, AI readiness, speed, keywords."""
 
 import requests
 import re
 import json
+from collections import Counter
 from urllib.parse import urlparse, urljoin
 
 
@@ -198,7 +199,139 @@ def audit_url(url: str) -> dict:
     add("geo", "Rich schema", len(ai_schemas) > 0, ", ".join(ai_schemas) if ai_schemas else "",
         "Add FAQ/Article/Product schema for AI citations" if not ai_schemas else "")
 
+    # ─── Page Speed (Google PageSpeed Insights API) ──────────────
+    results["speed"] = _check_pagespeed(url)
+
+    # ─── Keywords ────────────────────────────────────────────────
+    results["keywords"] = _extract_keywords(html, title, desc, h1)
+
     return results
+
+
+# ─── Helpers ─────────────────────────────────────────────────────────
+
+
+STOP_WORDS = {
+    "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
+    "of", "with", "by", "from", "is", "it", "this", "that", "are", "was",
+    "be", "have", "has", "had", "do", "does", "did", "will", "would",
+    "could", "should", "may", "might", "can", "not", "no", "so", "if",
+    "as", "than", "then", "just", "also", "how", "all", "each", "every",
+    "your", "our", "their", "its", "my", "his", "her", "we", "you", "they",
+    "i", "me", "he", "she", "us", "them", "who", "what", "which", "when",
+    "where", "why", "more", "most", "some", "any", "new", "get", "make",
+    "about", "up", "out", "one", "two", "been", "into", "over", "only",
+    # Russian
+    "и", "в", "на", "с", "для", "что", "это", "как", "по", "из", "не",
+    "от", "за", "все", "или", "но", "его", "она", "они", "мы", "вы",
+    "он", "её", "их", "вас", "нас", "так", "уже", "при", "до", "без",
+}
+
+
+def _extract_text(html: str) -> str:
+    """Strip tags, scripts, styles from HTML to get visible text."""
+    text = re.sub(r'<script[^>]*>.*?</script>', ' ', html, flags=re.S | re.I)
+    text = re.sub(r'<style[^>]*>.*?</style>', ' ', text, flags=re.S | re.I)
+    text = re.sub(r'<[^>]+>', ' ', text)
+    text = re.sub(r'&\w+;', ' ', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
+
+
+def _tokenize(text: str) -> list[str]:
+    """Extract lowercase words, filter stop words and short tokens."""
+    words = re.findall(r'[a-zA-Zа-яА-ЯёЁ]{3,}', text.lower())
+    return [w for w in words if w not in STOP_WORDS]
+
+
+def _extract_keywords(html: str, title: str, desc: str, h1: str) -> dict:
+    """Analyze page keywords: density, title/h1/desc presence."""
+    body_text = _extract_text(html)
+    words = _tokenize(body_text)
+
+    if not words:
+        return {"top_words": [], "top_bigrams": [], "in_title": [], "in_h1": [], "in_desc": []}
+
+    # Single words
+    word_counts = Counter(words)
+    total = len(words)
+    top_words = []
+    for word, count in word_counts.most_common(15):
+        top_words.append({
+            "word": word, "count": count,
+            "density": round(count / total * 100, 1),
+        })
+
+    # Bigrams (2-word phrases)
+    bigrams = [f"{words[i]} {words[i+1]}" for i in range(len(words) - 1)]
+    bigram_counts = Counter(bigrams)
+    top_bigrams = []
+    for bg, count in bigram_counts.most_common(10):
+        if count >= 2:
+            top_bigrams.append({"phrase": bg, "count": count})
+
+    # Check top keywords presence in title, h1, description
+    title_lower = title.lower()
+    h1_lower = h1.lower()
+    desc_lower = desc.lower()
+
+    top_kw = [w["word"] for w in top_words[:10]]
+    in_title = [w for w in top_kw if w in title_lower]
+    in_h1 = [w for w in top_kw if w in h1_lower]
+    in_desc = [w for w in top_kw if w in desc_lower]
+
+    return {
+        "top_words": top_words,
+        "top_bigrams": top_bigrams,
+        "in_title": in_title,
+        "in_h1": in_h1,
+        "in_desc": in_desc,
+        "total_words": total,
+    }
+
+
+def _check_pagespeed(url: str) -> dict:
+    """Get Core Web Vitals via Google PageSpeed Insights API (free, no key)."""
+    result = {"mobile": {}, "desktop": {}}
+
+    for strategy in ("mobile", "desktop"):
+        try:
+            api_url = (
+                f"https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
+                f"?url={requests.utils.quote(url)}&strategy={strategy}"
+                f"&category=performance&category=seo&category=best-practices"
+            )
+            resp = requests.get(api_url, timeout=60)
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+
+            # Lighthouse scores
+            cats = data.get("lighthouseResult", {}).get("categories", {})
+            scores = {}
+            for cat_id, cat_data in cats.items():
+                scores[cat_id] = int((cat_data.get("score") or 0) * 100)
+
+            # Core Web Vitals from field data
+            crux = data.get("loadingExperience", {}).get("metrics", {})
+            cwv = {}
+            metric_map = {
+                "LARGEST_CONTENTFUL_PAINT_MS": "LCP",
+                "CUMULATIVE_LAYOUT_SHIFT_SCORE": "CLS",
+                "INTERACTION_TO_NEXT_PAINT": "INP",
+                "FIRST_CONTENTFUL_PAINT_MS": "FCP",
+            }
+            for key, label in metric_map.items():
+                if key in crux:
+                    val = crux[key].get("percentile", 0)
+                    cat = crux[key].get("category", "?")
+                    cwv[label] = {"value": val, "rating": cat}
+
+            result[strategy] = {"scores": scores, "cwv": cwv}
+        except Exception:
+            pass
+
+    return result
 
 
 def format_report(audit: dict) -> str:
