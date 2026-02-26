@@ -41,6 +41,10 @@ def _has_indexnow(cfg: dict) -> bool:
     return bool(cfg.get("indexnow", {}).get("key"))
 
 
+def _has_cloudflare(cfg: dict) -> bool:
+    return bool(cfg.get("cloudflare", {}).get("api_token"))
+
+
 _gsc_cache: set[str] | None = None
 
 
@@ -590,7 +594,8 @@ def audit(url):
     pct = int(score / max_score * 100) if max_score else 0
     color = "green" if pct >= 80 else ("yellow" if pct >= 60 else "red")
 
-    console.print(Panel(f"[bold]{urls[0]}[/]  —  [{color}]{score}/{max_score} ({pct}%)[/]", title="SEO+GEO Audit", style=color))
+    locale_info = f"  (locale: {result['locale_url']})" if result.get("locale_url") else ""
+    console.print(Panel(f"[bold]{urls[0]}[/]{locale_info}  —  [{color}]{score}/{max_score} ({pct}%)[/]", title="SEO+GEO Audit", style=color))
 
     categories = {}
     for c in result["checks"]:
@@ -695,6 +700,884 @@ def audit(url):
         for i, c in enumerate(fails, 1):
             console.print(f"  {i}. {c['hint']}")
     console.print()
+
+
+@cli.command()
+@click.argument("site_name", required=False)
+@click.option("--skip-audit", is_flag=True, help="Skip initial audit step")
+def launch(site_name, skip_audit):
+    """New site promotion — register, submit sitemaps, ping, audit."""
+    cfg = load_config()
+    sites = cfg.get("sites", [])
+
+    if site_name:
+        sites = [s for s in sites if s["name"].lower() == site_name.lower()]
+        if not sites:
+            console.print(f"[red]Site '{site_name}' not found in config.[/]")
+            return
+
+    google_ok = _has_google(cfg)
+    bing_ok = _has_bing(cfg)
+    yandex_ok = _has_yandex(cfg)
+    indexnow_ok = _has_indexnow(cfg)
+
+    for s in sites:
+        console.print(Panel(f"[bold]{s['name']}[/] — {s['url']}", title="Launch", style="blue"))
+        steps = []
+
+        # Step 1: Add to search engines
+        if google_ok:
+            from engines.google_sc import add_site as gsc_add
+            try:
+                gsc_add(cfg["google"]["service_account_file"], s["url"] + "/")
+                steps.append(("Google SC", True, "Added"))
+            except Exception as e:
+                steps.append(("Google SC", False, str(e)[:60]))
+        else:
+            steps.append(("Google SC", False, "Not configured"))
+
+        if bing_ok:
+            from engines.bing import add_site as bing_add
+            try:
+                bing_add(cfg["bing"]["api_key"], s["url"])
+                steps.append(("Bing WMT", True, "Added"))
+            except Exception as e:
+                steps.append(("Bing WMT", False, str(e)[:60]))
+        else:
+            steps.append(("Bing WMT", False, "Not configured"))
+
+        if yandex_ok:
+            from engines.yandex import get_user_id, add_site as yandex_add
+            try:
+                uid = get_user_id(cfg["yandex"]["oauth_token"])
+                yandex_add(cfg["yandex"]["oauth_token"], uid, s["url"])
+                steps.append(("Yandex WM", True, "Added"))
+            except Exception as e:
+                steps.append(("Yandex WM", False, str(e)[:60]))
+        else:
+            steps.append(("Yandex WM", False, "Not configured"))
+
+        # Step 2: Submit sitemaps
+        sitemap = s.get("sitemap", "")
+        if sitemap:
+            if google_ok:
+                from engines.google_sc import submit_sitemap as gsc_submit
+                try:
+                    sa = cfg["google"]["service_account_file"]
+                    gsc_url = _resolve_gsc_url(sa, s["url"])
+                    if gsc_url:
+                        gsc_submit(sa, gsc_url, sitemap)
+                        steps.append(("Sitemap → Google", True, "Submitted"))
+                    else:
+                        steps.append(("Sitemap → Google", False, "Not in GSC yet"))
+                except Exception as e:
+                    steps.append(("Sitemap → Google", False, str(e)[:60]))
+
+            if bing_ok:
+                from engines.bing import submit_sitemap as bing_submit
+                try:
+                    bing_submit(cfg["bing"]["api_key"], s["url"], sitemap)
+                    steps.append(("Sitemap → Bing", True, "Submitted"))
+                except Exception as e:
+                    steps.append(("Sitemap → Bing", False, str(e)[:60]))
+
+            if yandex_ok:
+                from engines.yandex import get_host_id, submit_sitemap as yandex_submit
+                try:
+                    uid = get_user_id(cfg["yandex"]["oauth_token"])
+                    hid = get_host_id(cfg["yandex"]["oauth_token"], uid, s["url"])
+                    if hid:
+                        yandex_submit(cfg["yandex"]["oauth_token"], uid, hid, sitemap)
+                        steps.append(("Sitemap → Yandex", True, "Submitted"))
+                    else:
+                        steps.append(("Sitemap → Yandex", False, "Host not found"))
+                except Exception as e:
+                    steps.append(("Sitemap → Yandex", False, str(e)[:60]))
+        else:
+            steps.append(("Sitemap", False, "No sitemap URL in config"))
+
+        # Step 3: IndexNow ping
+        if indexnow_ok and sitemap:
+            from engines.indexnow import submit_sitemap_urls
+            try:
+                result = submit_sitemap_urls(cfg["indexnow"]["key"], s["url"], sitemap)
+                if result["ok"]:
+                    steps.append(("IndexNow ping", True, f"{result.get('urls_count', '?')} URLs"))
+                else:
+                    steps.append(("IndexNow ping", False, f"HTTP {result['status']}"))
+            except Exception as e:
+                steps.append(("IndexNow ping", False, str(e)[:60]))
+        elif not indexnow_ok:
+            steps.append(("IndexNow ping", False, "Not configured"))
+
+        # Step 4: Verify IndexNow key file
+        if indexnow_ok:
+            import requests as req
+            key = cfg["indexnow"]["key"]
+            try:
+                resp = req.get(f"{s['url']}/{key}.txt", timeout=10)
+                if resp.status_code == 200 and key in resp.text:
+                    steps.append(("IndexNow key file", True, "Verified"))
+                else:
+                    steps.append(("IndexNow key file", False, f"HTTP {resp.status_code}"))
+            except Exception:
+                steps.append(("IndexNow key file", False, "Unreachable"))
+
+        # Step 5: Initial audit
+        if not skip_audit:
+            from engines.audit import audit_url
+            try:
+                result = audit_url(s["url"], skip_speed=True)
+                pct = int(result["score"] / result["max_score"] * 100) if result["max_score"] else 0
+                color = "green" if pct >= 80 else ("yellow" if pct >= 60 else "red")
+                steps.append(("SEO Audit", pct >= 60, f"[{color}]{pct}%[/] ({result['score']}/{result['max_score']})"))
+            except Exception as e:
+                steps.append(("SEO Audit", False, str(e)[:60]))
+
+        # Display checklist
+        table = Table(title="Launch Checklist", box=box.ROUNDED)
+        table.add_column("Step", min_width=20)
+        table.add_column("Status", justify="center", width=4)
+        table.add_column("Details")
+        for step_name, ok, detail in steps:
+            icon = "[green]+[/]" if ok else "[red]x[/]"
+            table.add_row(step_name, icon, detail)
+        console.print(table)
+
+        passed = sum(1 for _, ok, _ in steps if ok)
+        total = len(steps)
+        console.print(Panel(
+            f"[bold]Next Steps:[/]\n"
+            f"  1. Verify domain ownership in Google SC & Yandex WM dashboards\n"
+            f"  2. Run [cyan]seo monitor[/] in a few days to track indexing\n"
+            f"  3. Run [cyan]seo improve {s['url']}[/] to fix audit issues\n"
+            f"  4. Run [cyan]seo competitors \"your keyword\"[/] to analyze competition",
+            title=f"{passed}/{total} passed",
+            style="green" if passed == total else "yellow",
+        ))
+        console.print()
+
+
+@cli.command()
+@click.argument("query")
+@click.option("--site", default=None, help="Site name from config to compare against")
+@click.option("--lang", default="en", help="Language code")
+@click.option("--num", default=10, help="Number of results to analyze")
+def competitors(query, site, lang, num):
+    """Competitor & keyword analysis for a search query."""
+    from engines.serp import google_search, extract_page_seo
+    from engines.keywords import google_autocomplete
+
+    cfg = load_config()
+
+    # Find our site URL if --site specified
+    our_url = None
+    if site:
+        for s in cfg.get("sites", []):
+            if s["name"].lower() == site.lower():
+                our_url = s["url"]
+                break
+        if not our_url:
+            console.print(f"[yellow]Site '{site}' not found in config, skipping comparison.[/]")
+
+    console.print(f"\n[bold]Competitor Analysis[/] — \"{query}\" (lang={lang}, top {num})\n")
+
+    # Step 1: Get SERP results
+    api_key = cfg.get("google", {}).get("cse_api_key", "")
+    cx = cfg.get("google", {}).get("cse_cx", "")
+    console.print("  [dim]Fetching Google results...[/]")
+    serp_results = google_search(query, lang=lang, num=num, api_key=api_key, cx=cx)
+
+    if not serp_results:
+        console.print("  [yellow]No results returned. Google may be blocking scraping.[/]")
+        console.print("  [dim]Try again later or reduce --num.[/]")
+        return
+
+    # Step 2: Extract SEO data from each competitor
+    console.print(f"  [dim]Analyzing {len(serp_results)} pages...[/]")
+    competitor_data = []
+    for r in serp_results:
+        console.print(f"    [dim]{r['position']}. {r['url'][:60]}...[/]")
+        seo = extract_page_seo(r["url"])
+        seo["position"] = r["position"]
+        seo["snippet"] = r.get("snippet", "")
+        if not seo.get("title"):
+            seo["title"] = r.get("title", "")
+        competitor_data.append(seo)
+
+    # Extract our site SEO if specified
+    our_seo = None
+    if our_url:
+        console.print(f"    [dim]Our site: {our_url}...[/]")
+        our_seo = extract_page_seo(our_url)
+
+    # Step 3: SERP Overview Table
+    table = Table(title=f"SERP Overview — \"{query}\"", box=box.ROUNDED)
+    table.add_column("#", justify="right", style="dim", width=3)
+    table.add_column("Domain", min_width=20)
+    table.add_column("Title", min_width=25, max_width=40)
+    table.add_column("Words", justify="right")
+    table.add_column("Schema", min_width=10)
+
+    for c in competitor_data:
+        if c.get("error"):
+            table.add_row(str(c["position"]), c.get("domain", "?"), "[dim]fetch error[/]", "", "")
+            continue
+        schema_str = ", ".join(c.get("schema_types", [])[:3]) or "[dim]none[/]"
+        table.add_row(
+            str(c["position"]),
+            c.get("domain", "?"),
+            (c.get("title", "")[:38] + "..") if len(c.get("title", "")) > 40 else c.get("title", ""),
+            str(c.get("word_count", 0)),
+            schema_str,
+        )
+
+    if our_seo and not our_seo.get("error"):
+        table.add_row(
+            "[cyan]*[/]",
+            f"[cyan]{our_seo.get('domain', '?')}[/]",
+            f"[cyan]{(our_seo.get('title', '')[:38] + '..') if len(our_seo.get('title', '')) > 40 else our_seo.get('title', '')}[/]",
+            f"[cyan]{our_seo.get('word_count', 0)}[/]",
+            f"[cyan]{', '.join(our_seo.get('schema_types', [])[:3]) or 'none'}[/]",
+        )
+
+    console.print(table)
+
+    # Step 4: Gap Analysis
+    # Collect what competitors have
+    all_schemas = set()
+    competitors_with_faq = 0
+    competitors_with_og = 0
+    avg_word_count = 0
+    valid_count = 0
+
+    for c in competitor_data:
+        if c.get("error"):
+            continue
+        valid_count += 1
+        all_schemas.update(c.get("schema_types", []))
+        if c.get("has_faq"):
+            competitors_with_faq += 1
+        if c.get("og_image"):
+            competitors_with_og += 1
+        avg_word_count += c.get("word_count", 0)
+
+    avg_word_count = avg_word_count // max(valid_count, 1)
+
+    gap_table = Table(title="Gap Analysis", box=box.SIMPLE)
+    gap_table.add_column("Metric", min_width=20)
+    gap_table.add_column("Competitors", min_width=15)
+    gap_table.add_column("Your Site" if our_seo else "Recommendation", min_width=15)
+
+    gap_table.add_row(
+        "Avg word count",
+        str(avg_word_count),
+        f"[{'green' if our_seo and our_seo.get('word_count', 0) >= avg_word_count else 'red'}]{our_seo.get('word_count', 0)}[/]" if our_seo and not our_seo.get("error") else f"Aim for {avg_word_count}+",
+    )
+    gap_table.add_row(
+        "Schema types",
+        ", ".join(sorted(all_schemas)[:5]) or "none",
+        ", ".join(our_seo.get("schema_types", [])[:3]) or "[red]none[/]" if our_seo and not our_seo.get("error") else "Add JSON-LD",
+    )
+    gap_table.add_row(
+        "FAQ/HowTo schema",
+        f"{competitors_with_faq}/{valid_count} have it",
+        "[green]Yes[/]" if our_seo and our_seo.get("has_faq") else "[red]Missing[/]" if our_seo else "Add FAQ schema",
+    )
+    gap_table.add_row(
+        "OG image",
+        f"{competitors_with_og}/{valid_count} have it",
+        "[green]Yes[/]" if our_seo and our_seo.get("og_image") else "[red]Missing[/]" if our_seo else "Add og:image",
+    )
+    console.print(gap_table)
+
+    # Step 5: Keyword suggestions
+    console.print(f"\n  [dim]Fetching keyword ideas...[/]")
+    suggestions = google_autocomplete(query, lang=lang)
+    if suggestions:
+        kw_table = Table(title="Related Keywords", box=box.SIMPLE)
+        kw_table.add_column("#", justify="right", style="dim")
+        kw_table.add_column("Keyword")
+        for i, s in enumerate(suggestions, 1):
+            kw_table.add_row(str(i), s)
+        console.print(kw_table)
+
+    console.print()
+
+
+@cli.command()
+@click.option("--days", default=7, help="Analytics period in days")
+@click.option("--threshold", default=3.0, help="Min position change to show")
+def monitor(days, threshold):
+    """Position tracking — compare current vs previous snapshot."""
+    from engines.storage import load_data, save_data, timestamp
+
+    cfg = load_config()
+    sites = cfg.get("sites", [])
+
+    if not _has_google(cfg):
+        console.print("[red]Google not configured.[/] Monitor requires GSC analytics.")
+        return
+
+    from engines.google_sc import get_search_analytics
+    sa = cfg["google"]["service_account_file"]
+
+    end = date.today().isoformat()
+    start = (date.today() - timedelta(days=days)).isoformat()
+
+    # Load previous snapshot
+    prev = load_data("monitor.json")
+    prev_sites = prev.get("sites", {})
+
+    # Build current snapshot
+    current = {"last_check": timestamp(), "sites": {}}
+    all_changes = []
+
+    console.print(f"\n[bold]Position Monitor[/] ({start} — {end})\n")
+
+    for s in sites:
+        name = s["name"]
+        gsc_url = _resolve_gsc_url(sa, s["url"])
+        if not gsc_url:
+            continue
+
+        try:
+            data = get_search_analytics(sa, gsc_url, start, end)
+            rows = data.get("rows", [])
+        except Exception as e:
+            console.print(f"  [red]x[/] {name}: {e}")
+            continue
+
+        # Build current query map
+        current_queries = {}
+        for r in rows:
+            query = r["keys"][0]
+            current_queries[query] = {
+                "clicks": r["clicks"],
+                "impressions": r["impressions"],
+                "position": round(r["position"], 1),
+            }
+        current["sites"][name] = {"queries": current_queries}
+
+        # Compare with previous
+        prev_queries = prev_sites.get(name, {}).get("queries", {})
+
+        if not prev_queries:
+            console.print(f"  [dim]{name}: baseline saved ({len(current_queries)} queries)[/]")
+            continue
+
+        for query, cur in current_queries.items():
+            prev_q = prev_queries.get(query)
+            if prev_q:
+                pos_delta = cur["position"] - prev_q["position"]
+                click_delta = cur["clicks"] - prev_q["clicks"]
+                if abs(pos_delta) >= threshold:
+                    all_changes.append({
+                        "site": name, "query": query,
+                        "pos_now": cur["position"], "pos_prev": prev_q["position"],
+                        "delta": pos_delta,
+                        "clicks_now": cur["clicks"], "clicks_prev": prev_q["clicks"],
+                        "click_delta": click_delta,
+                    })
+            else:
+                # New query
+                all_changes.append({
+                    "site": name, "query": query,
+                    "pos_now": cur["position"], "pos_prev": None,
+                    "delta": 0,
+                    "clicks_now": cur["clicks"], "clicks_prev": 0,
+                    "click_delta": cur["clicks"],
+                    "new": True,
+                })
+
+        # Check for dropped queries
+        for query, prev_q in prev_queries.items():
+            if query not in current_queries:
+                all_changes.append({
+                    "site": name, "query": query,
+                    "pos_now": None, "pos_prev": prev_q["position"],
+                    "delta": 0,
+                    "clicks_now": 0, "clicks_prev": prev_q["clicks"],
+                    "click_delta": -prev_q["clicks"],
+                    "dropped": True,
+                })
+
+    # Save current snapshot
+    save_data("monitor.json", current)
+
+    if not prev_sites:
+        console.print(Panel(
+            "Baseline snapshot saved. Run [cyan]seo monitor[/] again later to see changes.",
+            style="blue",
+        ))
+        return
+
+    if not all_changes:
+        console.print("  [dim]No significant position changes detected.[/]")
+        console.print()
+        return
+
+    # Display Position Changes Table
+    all_changes.sort(key=lambda x: abs(x.get("delta", 0)), reverse=True)
+
+    table = Table(title="Position Changes", box=box.ROUNDED)
+    table.add_column("Site", style="bold")
+    table.add_column("Query", min_width=25)
+    table.add_column("Position", justify="right")
+    table.add_column("Delta", justify="right")
+    table.add_column("Clicks", justify="right")
+    table.add_column("Status")
+
+    for ch in all_changes[:20]:
+        if ch.get("dropped"):
+            table.add_row(
+                ch["site"], ch["query"],
+                f"[dim]{ch['pos_prev']:.1f}[/]", "",
+                f"{ch['clicks_prev']} → 0",
+                "[red]DROPPED[/]",
+            )
+        elif ch.get("new"):
+            table.add_row(
+                ch["site"], ch["query"],
+                f"{ch['pos_now']:.1f}", "[cyan]NEW[/]",
+                str(ch["clicks_now"]),
+                "[cyan]NEW[/]",
+            )
+        else:
+            delta = ch["delta"]
+            # Negative delta = position improved (moved up)
+            color = "green" if delta < 0 else "red"
+            sign = "+" if delta > 0 else ""
+            table.add_row(
+                ch["site"], ch["query"],
+                f"{ch['pos_now']:.1f}",
+                f"[{color}]{sign}{delta:.1f}[/]",
+                f"{ch['clicks_prev']} → {ch['clicks_now']}",
+                f"[green]Improved[/]" if delta < 0 else "[red]Declined[/]",
+            )
+
+    console.print(table)
+
+    # Summary
+    improved = sum(1 for c in all_changes if not c.get("new") and not c.get("dropped") and c.get("delta", 0) < 0)
+    declined = sum(1 for c in all_changes if not c.get("new") and not c.get("dropped") and c.get("delta", 0) > 0)
+    new_q = sum(1 for c in all_changes if c.get("new"))
+    dropped_q = sum(1 for c in all_changes if c.get("dropped"))
+
+    console.print(Panel(
+        f"[green]{improved} improved[/]  |  [red]{declined} declined[/]  |  "
+        f"[cyan]{new_q} new[/]  |  [red]{dropped_q} dropped[/]",
+        title="Summary",
+        style="blue",
+    ))
+    console.print()
+
+
+# Impact scores for audit checks (used by improve command)
+_IMPACT = {
+    "Title": 10, "Robots meta": 10, "HTTPS": 10,
+    "Meta description": 9, "sitemap.xml": 9,
+    "JSON-LD": 8, "H1": 8, "robots.txt": 8,
+    "og:image": 7, "Canonical": 7, "Organization/WebSite": 7,
+    "Rich schema": 6, "og:title": 6, "og:description": 6,
+    "llms.txt": 5, "Image alt tags": 5, "Internal links": 5,
+    "Viewport": 5, "Favicon": 4, "Hreflang": 3,
+    "AI bots allowed": 4, "Markdown content": 3,
+    "llms-full.txt": 2, "og:url": 2, "og:type": 2, "twitter:card": 2,
+}
+
+_DIFFICULTY = {
+    "Title": "Easy", "Meta description": "Easy", "H1": "Easy",
+    "Canonical": "Easy", "Viewport": "Easy", "og:title": "Easy",
+    "og:description": "Easy", "og:image": "Easy", "og:url": "Easy",
+    "og:type": "Easy", "twitter:card": "Easy", "Hreflang": "Medium",
+    "JSON-LD": "Medium", "Organization/WebSite": "Medium",
+    "Rich schema": "Medium", "Favicon": "Easy",
+    "robots.txt": "Easy", "sitemap.xml": "Medium",
+    "HTTPS": "Hard", "Robots meta": "Easy",
+    "llms.txt": "Medium", "llms-full.txt": "Medium",
+    "AI bots allowed": "Easy", "Markdown content": "Medium",
+    "Image alt tags": "Medium", "Internal links": "Medium",
+}
+
+
+@cli.command()
+@click.argument("url", required=False)
+@click.option("--history", is_flag=True, help="Show full fix history")
+def improve(url, history):
+    """Audit→fix cycle with priority tracking."""
+    from engines.storage import load_data, save_data, timestamp
+    from engines.audit import audit_url
+
+    cfg = load_config()
+
+    # Load previous issues
+    prev = load_data("issues.json")
+    prev_issues = prev.get("issues", {})
+    prev_time = prev.get("last_check", "")
+
+    if history:
+        if not prev_issues:
+            console.print("  [dim]No history yet. Run [cyan]seo improve[/] first.[/]")
+            return
+        table = Table(title="Fix History", box=box.ROUNDED)
+        table.add_column("Site")
+        table.add_column("Issue")
+        table.add_column("Status")
+        table.add_column("Since")
+        for key, info in sorted(prev_issues.items()):
+            site, check_name = key.split("|", 1)
+            status = info.get("status", "open")
+            color = "green" if status == "fixed" else "red"
+            table.add_row(site, check_name, f"[{color}]{status}[/]", info.get("first_seen", "?"))
+        console.print(table)
+        console.print()
+        return
+
+    # Run audits
+    urls = [url] if url else [s["url"] for s in cfg.get("sites", [])]
+    all_issues = []
+    current_issue_keys = set()
+
+    for target in urls:
+        console.print(f"  [dim]Auditing {target}...[/]")
+        result = audit_url(target, skip_speed=True)
+        site_label = target.replace("https://", "").replace("http://", "")
+
+        for c in result["checks"]:
+            if not c["ok"]:
+                key = f"{site_label}|{c['name']}"
+                current_issue_keys.add(key)
+                impact = _IMPACT.get(c["name"], 5)
+                difficulty = _DIFFICULTY.get(c["name"], "Medium")
+
+                # Determine status vs previous
+                prev_info = prev_issues.get(key)
+                if prev_info:
+                    days_open = (date.today() - date.fromisoformat(prev_info["first_seen"][:10])).days
+                    status = f"Open ({days_open}d)"
+                    first_seen = prev_info["first_seen"]
+                else:
+                    status = "New"
+                    first_seen = timestamp()
+
+                all_issues.append({
+                    "key": key, "site": site_label, "category": c["category"],
+                    "name": c["name"], "impact": impact, "difficulty": difficulty,
+                    "hint": c.get("hint", ""), "status": status, "first_seen": first_seen,
+                })
+
+    # Check for fixed issues
+    fixed = []
+    for key, info in prev_issues.items():
+        if info.get("status") != "fixed" and key not in current_issue_keys:
+            fixed.append(key)
+
+    # Build and save updated issues
+    now = timestamp()
+    updated_issues = {}
+    for issue in all_issues:
+        updated_issues[issue["key"]] = {
+            "status": "open",
+            "first_seen": issue["first_seen"],
+            "last_seen": now,
+        }
+    for key in fixed:
+        updated_issues[key] = {
+            "status": "fixed",
+            "first_seen": prev_issues[key]["first_seen"],
+            "fixed_at": now,
+        }
+    # Keep historical fixed items
+    for key, info in prev_issues.items():
+        if info.get("status") == "fixed" and key not in updated_issues:
+            updated_issues[key] = info
+
+    save_data("issues.json", {"last_check": now, "issues": updated_issues})
+
+    # Sort by impact (highest first)
+    all_issues.sort(key=lambda x: x["impact"], reverse=True)
+
+    if not all_issues and not fixed:
+        console.print(Panel("[green]All checks passing! No issues found.[/]", style="green"))
+        return
+
+    # Display Priority Action Table
+    if all_issues:
+        table = Table(title="Priority Actions", box=box.ROUNDED)
+        table.add_column("#", justify="right", style="dim", width=3)
+        table.add_column("Site", min_width=14)
+        table.add_column("Cat", width=6)
+        table.add_column("Issue", min_width=15)
+        table.add_column("Impact", justify="center", width=6)
+        table.add_column("Difficulty", justify="center")
+        table.add_column("Hint", min_width=20)
+        table.add_column("Status")
+
+        for i, issue in enumerate(all_issues, 1):
+            impact_color = "red" if issue["impact"] >= 9 else ("yellow" if issue["impact"] >= 7 else "dim")
+            diff_color = "green" if issue["difficulty"] == "Easy" else ("yellow" if issue["difficulty"] == "Medium" else "red")
+            status_color = "cyan" if issue["status"] == "New" else "yellow"
+            table.add_row(
+                str(i),
+                issue["site"],
+                issue["category"].upper(),
+                issue["name"],
+                f"[{impact_color}]{issue['impact']}[/]",
+                f"[{diff_color}]{issue['difficulty']}[/]",
+                issue["hint"][:50] if issue["hint"] else "",
+                f"[{status_color}]{issue['status']}[/]",
+            )
+        console.print(table)
+
+    # Progress Panel
+    new_count = sum(1 for i in all_issues if i["status"] == "New")
+    open_count = sum(1 for i in all_issues if i["status"] != "New")
+    fixed_count = len(fixed)
+
+    console.print(Panel(
+        f"[green]{fixed_count} fixed[/]  |  [yellow]{open_count} open[/]  |  [cyan]{new_count} new[/]"
+        + (f"  |  Previous check: {prev_time[:10]}" if prev_time else ""),
+        title="Progress",
+        style="blue",
+    ))
+    console.print()
+
+
+@cli.command()
+@click.option("--days", default=7, help="Number of days to show")
+def traffic(days):
+    """Cloudflare traffic analytics for all sites."""
+    cfg = load_config()
+    if not _has_cloudflare(cfg):
+        console.print("[red]Cloudflare not configured.[/] Add cloudflare.api_token to config.yaml")
+        return
+
+    from engines.cloudflare import list_zones, get_zone_analytics, get_zone_errors, get_zone_countries
+
+    token = cfg["cloudflare"]["api_token"]
+    sites = cfg.get("sites", [])
+    end = date.today().isoformat()
+    start = (date.today() - timedelta(days=days)).isoformat()
+
+    # Map site names to zone IDs
+    try:
+        zones = list_zones(token)
+    except Exception as e:
+        console.print(f"[red]Failed to list zones:[/] {e}")
+        return
+
+    zone_map = {z["name"]: z["id"] for z in zones}
+
+    console.print(f"\n[bold]Cloudflare Traffic[/] ({start} — {end})\n")
+
+    # Summary table
+    summary = Table(title="Traffic Summary", box=box.ROUNDED)
+    summary.add_column("Site", style="bold", min_width=18)
+    summary.add_column("Page Views", justify="right")
+    summary.add_column("Uniques", justify="right", style="cyan")
+    summary.add_column("Requests", justify="right")
+    summary.add_column("Bandwidth", justify="right")
+    summary.add_column("Threats", justify="right")
+    summary.add_column("Avg/day", justify="right", style="green")
+
+    all_site_data = []
+
+    for s in sites:
+        from urllib.parse import urlparse as _urlparse
+        domain = _urlparse(s["url"]).netloc
+        zone_id = zone_map.get(domain)
+        if not zone_id:
+            summary.add_row(s["name"], "[dim]not in CF[/]", "", "", "", "", "")
+            continue
+
+        try:
+            analytics = get_zone_analytics(token, zone_id, start, end)
+        except Exception as e:
+            summary.add_row(s["name"], f"[red]{e}[/]", "", "", "", "", "")
+            continue
+
+        total_pv = sum(d["sum"]["pageViews"] for d in analytics)
+        total_uniq = sum(d["uniq"]["uniques"] for d in analytics)
+        total_req = sum(d["sum"]["requests"] for d in analytics)
+        total_bytes = sum(d["sum"]["bytes"] for d in analytics)
+        total_threats = sum(d["sum"]["threats"] for d in analytics)
+        avg_uniq = total_uniq // max(len(analytics), 1)
+
+        # Format bandwidth
+        if total_bytes >= 1_000_000_000:
+            bw = f"{total_bytes / 1_000_000_000:.1f} GB"
+        elif total_bytes >= 1_000_000:
+            bw = f"{total_bytes / 1_000_000:.0f} MB"
+        else:
+            bw = f"{total_bytes / 1_000:.0f} KB"
+
+        threat_str = f"[red]{total_threats}[/]" if total_threats else "[green]0[/]"
+
+        summary.add_row(
+            s["name"],
+            f"{total_pv:,}",
+            f"{total_uniq:,}",
+            f"{total_req:,}",
+            bw,
+            threat_str,
+            f"{avg_uniq:,}/day",
+        )
+        all_site_data.append({
+            "name": s["name"], "domain": domain, "zone_id": zone_id,
+            "analytics": analytics, "total_uniq": total_uniq,
+        })
+
+    console.print(summary)
+
+    # Daily breakdown for top sites
+    for site in sorted(all_site_data, key=lambda x: x["total_uniq"], reverse=True)[:3]:
+        if not site["analytics"]:
+            continue
+        table = Table(title=f"{site['name']} — Daily", box=box.SIMPLE)
+        table.add_column("Date")
+        table.add_column("Views", justify="right")
+        table.add_column("Uniques", justify="right", style="cyan")
+        table.add_column("Requests", justify="right")
+
+        for d in site["analytics"]:
+            table.add_row(
+                d["dimensions"]["date"],
+                f"{d['sum']['pageViews']:,}",
+                f"{d['uniq']['uniques']:,}",
+                f"{d['sum']['requests']:,}",
+            )
+        console.print(table)
+
+    # Top countries (aggregate)
+    for site in all_site_data[:1]:  # Top site only
+        try:
+            countries = get_zone_countries(token, site["zone_id"], start, end)
+            if countries:
+                ctable = Table(title=f"{site['name']} — Top Countries", box=box.SIMPLE)
+                ctable.add_column("Country")
+                ctable.add_column("Requests", justify="right")
+                for c in countries[:10]:
+                    ctable.add_row(c["country"], f"{c['requests']:,}")
+                console.print(ctable)
+        except Exception:
+            pass
+
+    # HTTP errors
+    has_errors = False
+    for site in all_site_data:
+        try:
+            error_data = get_zone_errors(token, site["zone_id"], start, end)
+            status_totals = {}
+            for day in error_data:
+                for s_entry in day.get("sum", {}).get("responseStatusMap", []):
+                    code = s_entry["edgeResponseStatus"]
+                    if code >= 400:
+                        status_totals[code] = status_totals.get(code, 0) + s_entry["requests"]
+            if status_totals:
+                if not has_errors:
+                    console.print()
+                    etable = Table(title="HTTP Errors", box=box.SIMPLE)
+                    etable.add_column("Site")
+                    etable.add_column("Status")
+                    etable.add_column("Count", justify="right")
+                    has_errors = True
+                for code, count in sorted(status_totals.items()):
+                    color = "yellow" if code < 500 else "red"
+                    etable.add_row(site["name"], f"[{color}]{code}[/]", f"{count:,}")
+        except Exception:
+            pass
+
+    if has_errors:
+        console.print(etable)
+
+    console.print()
+
+
+@cli.command()
+@click.option("--days", default=7, help="Number of days to analyze")
+def crawlers(days):
+    """AI crawler analytics — who's crawling your sites (GEO insight)."""
+    cfg = load_config()
+    if not _has_cloudflare(cfg):
+        console.print("[red]Cloudflare not configured.[/] Add cloudflare.api_token to config.yaml")
+        return
+
+    from engines.cloudflare import (
+        list_zones, get_ai_crawler_stats, get_ai_referral_traffic, get_ai_top_paths,
+    )
+
+    token = cfg["cloudflare"]["api_token"]
+    sites = cfg.get("sites", [])
+
+    end_dt = date.today().isoformat() + "T23:59:59Z"
+    start_dt = (date.today() - timedelta(days=days)).isoformat() + "T00:00:00Z"
+
+    try:
+        zones = list_zones(token)
+    except Exception as e:
+        console.print(f"[red]Failed to list zones:[/] {e}")
+        return
+
+    zone_map = {z["name"]: z["id"] for z in zones}
+
+    console.print(f"\n[bold]AI Crawler Analytics[/] (last {days} days)\n")
+
+    for s in sites:
+        from urllib.parse import urlparse as _urlparse
+        domain = _urlparse(s["url"]).netloc
+        zone_id = zone_map.get(domain)
+        if not zone_id:
+            continue
+
+        console.print(f"  [dim]Scanning {s['name']}...[/]")
+
+        # AI crawler stats
+        crawler_stats = get_ai_crawler_stats(token, zone_id, start_dt, end_dt)
+
+        if crawler_stats:
+            table = Table(title=f"{s['name']} — AI Crawlers", box=box.ROUNDED)
+            table.add_column("Crawler", min_width=18)
+            table.add_column("Requests", justify="right", style="cyan")
+            table.add_column("Bandwidth", justify="right")
+            table.add_column("Avg/day", justify="right", style="green")
+
+            for c in crawler_stats:
+                bw = c["bytes"]
+                if bw >= 1_000_000:
+                    bw_str = f"{bw / 1_000_000:.1f} MB"
+                elif bw >= 1_000:
+                    bw_str = f"{bw / 1_000:.0f} KB"
+                else:
+                    bw_str = f"{bw} B"
+                avg = c["requests"] // max(days, 1)
+                table.add_row(c["crawler"], f"{c['requests']:,}", bw_str, f"{avg:,}/day")
+
+            console.print(table)
+        else:
+            console.print(f"  [dim]{s['name']}: no AI crawler activity detected[/]")
+
+        # AI referral traffic
+        referrals = get_ai_referral_traffic(token, zone_id, start_dt, end_dt)
+        if referrals:
+            rtable = Table(title=f"{s['name']} — AI Referral Traffic", box=box.SIMPLE)
+            rtable.add_column("Source")
+            rtable.add_column("Visits", justify="right", style="green")
+            for r in referrals:
+                rtable.add_row(r["referrer"], f"{r['requests']:,}")
+            console.print(rtable)
+
+        # Top paths crawled by AI
+        paths = get_ai_top_paths(token, zone_id, start_dt, end_dt)
+        if paths:
+            ptable = Table(title=f"{s['name']} — Top AI-Crawled Paths", box=box.SIMPLE)
+            ptable.add_column("Path", min_width=30)
+            ptable.add_column("Requests", justify="right")
+            for p in paths[:10]:
+                ptable.add_row(p["path"], f"{p['requests']:,}")
+            console.print(ptable)
+
+        console.print()
 
 
 @cli.command()

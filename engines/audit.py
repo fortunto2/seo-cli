@@ -61,6 +61,84 @@ def _check_exists(url: str) -> tuple[bool, int]:
     return resp.status_code == 200, resp.status_code
 
 
+def _detect_locale_url(url: str, html: str) -> str | None:
+    """Detect locale routing — if root is thin, find the real locale page.
+
+    Checks: hreflang links, meta refresh, common locale paths (/en/, /ru/).
+    Returns locale URL if found, None if root page is fine.
+    """
+    title = _extract_tag(html, "title")
+    h1 = _extract_tag(html, "h1")
+    desc = _extract_meta(html, "description")
+    jsonld = _extract_jsonld(html)
+
+    # Root page has full content (title + JSON-LD) — no locale redirect needed
+    if title and jsonld:
+        return None
+
+    parsed = urlparse(url)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+
+    # Check hreflang links for locale URLs
+    hreflang_urls = re.findall(
+        r'<link\s+[^>]*hreflang="([^"]*)"[^>]*href="([^"]*)"', html, re.I
+    )
+    if not hreflang_urls:
+        hreflang_urls = re.findall(
+            r'<link\s+[^>]*href="([^"]*)"[^>]*hreflang="([^"]*)"', html, re.I
+        )
+        hreflang_urls = [(lang, href) for href, lang in hreflang_urls]
+
+    # Prefer x-default, then en, then first available
+    for lang, href in hreflang_urls:
+        if lang == "x-default":
+            return href if href.startswith("http") else urljoin(base, href)
+    for lang, href in hreflang_urls:
+        if lang.startswith("en"):
+            return href if href.startswith("http") else urljoin(base, href)
+    if hreflang_urls:
+        href = hreflang_urls[0][1]
+        return href if href.startswith("http") else urljoin(base, href)
+
+    # Check meta http-equiv refresh redirect
+    refresh = re.search(r'<meta\s+http-equiv="refresh"[^>]*url=([^">\s]+)', html, re.I)
+    if refresh:
+        target = refresh.group(1).strip("'\"")
+        return target if target.startswith("http") else urljoin(base, target)
+
+    # Check common JS redirect patterns
+    js_redirect = re.search(r'(?:window\.location|location\.href)\s*=\s*["\']([^"\']+)["\']', html)
+    if js_redirect:
+        target = js_redirect.group(1)
+        return target if target.startswith("http") else urljoin(base, target)
+
+    # Probe common locale paths
+    for locale in ("en", "ru"):
+        locale_url = f"{base}/{locale}/"
+        resp = _fetch(locale_url, timeout=10)
+        if resp and resp.status_code == 200:
+            locale_title = _extract_tag(resp.text, "title")
+            if locale_title and (not title or len(locale_title) > len(title)):
+                return locale_url
+
+    return None
+
+
+def _parse_hreflangs(html: str) -> list[dict]:
+    """Parse all hreflang link tags into structured list."""
+    results = []
+    for m in re.finditer(
+        r'<link\s+[^>]*hreflang="([^"]*)"[^>]*href="([^"]*)"', html, re.I
+    ):
+        results.append({"lang": m.group(1), "href": m.group(2)})
+    for m in re.finditer(
+        r'<link\s+[^>]*href="([^"]*)"[^>]*hreflang="([^"]*)"', html, re.I
+    ):
+        if not any(r["lang"] == m.group(2) for r in results):
+            results.append({"lang": m.group(2), "href": m.group(1)})
+    return results
+
+
 def audit_url(url: str, skip_speed: bool = False) -> dict:
     """Full SEO + GEO audit of a URL."""
     parsed = urlparse(url)
@@ -81,6 +159,14 @@ def audit_url(url: str, skip_speed: bool = False) -> dict:
         return results
 
     html = resp.text
+
+    # ─── Locale Detection ────────────────────────────────────────
+    locale_url = _detect_locale_url(url, html)
+    if locale_url and locale_url.rstrip("/") != url.rstrip("/"):
+        locale_resp = _fetch(locale_url)
+        if locale_resp and locale_resp.status_code == 200:
+            results["locale_url"] = locale_url
+            html = locale_resp.text
 
     # ─── SEO Basics ──────────────────────────────────────────────
     title = _extract_tag(html, "title")
@@ -105,10 +191,35 @@ def audit_url(url: str, skip_speed: bool = False) -> dict:
     viewport = _extract_meta(html, "viewport")
     add("seo", "Viewport", bool(viewport), "", "Missing viewport meta (mobile)" if not viewport else "")
 
-    # Hreflang
-    hreflangs = re.findall(r'<link\s+[^>]*hreflang="([^"]*)"', html, re.I)
+    # ─── Hreflang / i18n ─────────────────────────────────────────
+    hreflangs = _parse_hreflangs(html)
+    lang_codes = [h["lang"] for h in hreflangs]
+
     add("seo", "Hreflang", len(hreflangs) > 0, f"{len(hreflangs)} languages" if hreflangs else "",
         "No hreflang (ok if single language)" if not hreflangs else "")
+
+    if hreflangs:
+        # Check x-default exists
+        has_x_default = "x-default" in lang_codes
+        add("seo", "Hreflang x-default", has_x_default, "",
+            "Add hreflang x-default for language fallback" if not has_x_default else "")
+
+        # Check self-referencing — current page URL should be in hreflang hrefs
+        audit_url_norm = (locale_url or url).rstrip("/")
+        self_ref = any(h["href"].rstrip("/") == audit_url_norm for h in hreflangs)
+        add("seo", "Hreflang self-ref", self_ref, "",
+            "Current page should be in its own hreflang set" if not self_ref else "")
+
+        # Check all hreflang URLs are absolute
+        all_absolute = all(h["href"].startswith("http") for h in hreflangs)
+        add("seo", "Hreflang absolute URLs", all_absolute, "",
+            "Hreflang hrefs must be absolute URLs" if not all_absolute else "")
+
+    # Check html lang attribute
+    html_lang = re.search(r'<html[^>]*\slang="([^"]*)"', html, re.I)
+    lang_val = html_lang.group(1) if html_lang else ""
+    add("seo", "HTML lang attr", bool(lang_val), lang_val,
+        "Add lang attribute to <html> tag" if not lang_val else "")
 
     # ─── Open Graph ──────────────────────────────────────────────
     og_title = _extract_meta(html, "og:title")
