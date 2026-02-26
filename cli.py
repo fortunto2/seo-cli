@@ -9,6 +9,7 @@ Usage:
     python cli.py add             # Add all sites to all engines
     python cli.py analytics       # Search analytics from Google & Yandex
     python cli.py inspect URL     # Check indexing status of a URL (Google)
+    python cli.py reindex URL     # Request instant reindexing (Google + IndexNow)
 """
 
 import sys
@@ -337,6 +338,48 @@ def cmd_inspect(cfg: dict, url: str):
     print()
 
 
+def cmd_reindex(cfg: dict, url: str):
+    """Request instant reindexing of a URL (Google Indexing API + IndexNow)."""
+    if not url:
+        print("Usage: seo reindex <URL>")
+        return
+
+    # Google Indexing API
+    if _has_google(cfg):
+        from engines.google_indexing import publish_url
+        sa = cfg["google"]["service_account_file"]
+        print(f"\n--- Google Indexing API ---")
+        try:
+            result = publish_url(sa, url)
+            print(f"  OK  {url}")
+            print(f"  Notified: {result.get('urlNotificationMetadata', {}).get('latestUpdate', {}).get('notifyTime', '?')}")
+        except Exception as e:
+            print(f"  x   {e}")
+
+    # IndexNow
+    if _has_indexnow(cfg):
+        from engines.indexnow import submit_urls
+        key = cfg["indexnow"]["key"]
+        # Find which site this URL belongs to
+        site_url = None
+        for s in cfg.get("sites", []):
+            if url.startswith(s["url"]):
+                site_url = s["url"]
+                break
+        if site_url:
+            print(f"\n--- IndexNow ---")
+            try:
+                result = submit_urls(key, site_url, [url])
+                if result["ok"]:
+                    print(f"  OK  {url}")
+                else:
+                    print(f"  x   HTTP {result['status']}")
+            except Exception as e:
+                print(f"  x   {e}")
+
+    print()
+
+
 # ─── Main ────────────────────────────────────────────────────────────────
 
 
@@ -355,6 +398,7 @@ def main():
         "ping": lambda: cmd_ping(cfg),
         "analytics": lambda: cmd_analytics(cfg),
         "inspect": lambda: cmd_inspect(cfg, sys.argv[2] if len(sys.argv) > 2 else ""),
+        "reindex": lambda: cmd_reindex(cfg, sys.argv[2] if len(sys.argv) > 2 else ""),
     }
 
     if cmd in commands:
