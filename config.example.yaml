@@ -29,7 +29,13 @@ sites:
   - url: "https://example.com"
     sitemap: "https://example.com/sitemap.xml"
     name: "MySite"
+    path: "/path/to/my-site"          # optional: local project directory
+    framework: "nextjs"               # optional: nextjs | astro | etc.
+    hosting: "vercel"                 # optional: vercel | cloudflare | etc.
 
   # - url: "https://another-site.com"
   #   sitemap: "https://another-site.com/sitemap.xml"
   #   name: "AnotherSite"
+  #   path: "/path/to/another-site"
+  #   framework: "astro"
+  #   hosting: "cloudflare"
