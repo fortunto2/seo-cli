@@ -15,6 +15,20 @@ CONFIG_PATH = Path(__file__).parent / "config.yaml"
 console = Console()
 
 
+def _trunc(text: str, width: int = 45) -> str:
+    """Truncate text with ellipsis if too long."""
+    if len(text) <= width:
+        return text
+    return text[:width - 1] + "\u2026"
+
+
+def _fmt_duration(seconds: float) -> str:
+    """Format duration: <60s as '42s', >=60s as '1.5m'."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    return f"{seconds / 60:.1f}m"
+
+
 def load_config(required: bool = True) -> dict:
     if not CONFIG_PATH.exists():
         if required:
@@ -119,12 +133,13 @@ def status():
 
 
 @cli.command()
-def analytics():
-    """Search analytics last 28 days (Google + Yandex)."""
+@click.option("--days", default=28, help="Analytics period in days")
+def analytics(days):
+    """Search analytics (Google + Yandex)."""
     cfg = load_config()
     sites = cfg.get("sites", [])
     end = date.today().isoformat()
-    start = (date.today() - timedelta(days=28)).isoformat()
+    start = (date.today() - timedelta(days=days)).isoformat()
 
     if _has_google(cfg):
         from engines.google_sc import get_search_analytics
@@ -142,14 +157,20 @@ def analytics():
                 total_clicks = sum(r.get("clicks", 0) for r in rows)
                 total_impressions = sum(r.get("impressions", 0) for r in rows)
 
-                table = Table(title=f"{s['name']} — {total_clicks} clicks, {total_impressions:,} impressions", box=box.SIMPLE)
+                table = Table(title=f"{s['name']} — {total_clicks:,} clicks, {total_impressions:,} impressions", box=box.SIMPLE)
                 table.add_column("Query")
                 table.add_column("Clicks", justify="right", style="green")
                 table.add_column("Impressions", justify="right")
+                table.add_column("CTR", justify="right")
                 table.add_column("Position", justify="right", style="yellow")
 
                 for r in sorted(rows, key=lambda x: x["clicks"], reverse=True)[:10]:
-                    table.add_row(r["keys"][0], str(r["clicks"]), f"{r['impressions']:,}", f"{r['position']:.1f}")
+                    ctr = r.get("ctr", 0) * 100
+                    table.add_row(
+                        _trunc(r["keys"][0], 50),
+                        f"{r['clicks']:,}", f"{r['impressions']:,}",
+                        f"{ctr:.1f}%", f"{r['position']:.1f}",
+                    )
 
                 console.print(table)
                 console.print()
@@ -1677,7 +1698,7 @@ def crawlers(days):
             total_path_crawls = sum(p["requests"] for p in paths)
             for p in paths[:10]:
                 pct = p["requests"] / max(total_path_crawls, 1) * 100
-                ptable.add_row(p["path"][:50], f"{p['requests']:,}", f"{pct:.0f}%")
+                ptable.add_row(_trunc(p["path"], 50), f"{p['requests']:,}", f"{pct:.0f}%")
             console.print(ptable)
 
         console.print()
@@ -1768,8 +1789,6 @@ def ga(days, site):
             if ov:
                 engage_pct = int(ov["engaged_sessions"] / max(ov["sessions"], 1) * 100)
                 bounce_pct = int(ov["bounce_rate"] * 100)
-                avg_min = ov["avg_duration"] / 60
-
                 table = Table(title="Overview", box=box.ROUNDED, show_header=False)
                 table.add_column("Metric", style="bold", min_width=18)
                 table.add_column("Value", justify="right")
@@ -1777,7 +1796,7 @@ def ga(days, site):
                 table.add_row("Users", f"{ov['users']:,}")
                 table.add_row("New Users", f"{ov['new_users']:,}")
                 table.add_row("Page Views", f"{ov['pageviews']:,}")
-                table.add_row("Avg Duration", f"{avg_min:.1f} min")
+                table.add_row("Avg Duration", _fmt_duration(ov["avg_duration"]))
                 table.add_row("Bounce Rate", f"{bounce_pct}%")
                 table.add_row("Engaged", f"{ov['engaged_sessions']:,} ({engage_pct}%)")
                 console.print(table)
@@ -1802,10 +1821,10 @@ def ga(days, site):
                     bounce = float(p.get("bounceRate", 0)) * 100
                     bc = "green" if bounce < 40 else ("yellow" if bounce < 60 else "red")
                     ptable.add_row(
-                        p["pagePath"][:45],
-                        p["screenPageViews"],
-                        p["totalUsers"],
-                        f"{dur:.0f}s",
+                        _trunc(p["pagePath"]),
+                        f"{int(p['screenPageViews']):,}",
+                        f"{int(p['totalUsers']):,}",
+                        _fmt_duration(dur),
                         f"[{bc}]{bounce:.0f}%[/]",
                     )
                 console.print(ptable)
@@ -2022,9 +2041,10 @@ def compare(days, site):
                         dur = float(row.get("averageSessionDuration", 0))
                         nvr_table.add_row(
                             row.get("newVsReturning", "?"),
-                            row["sessions"], row["totalUsers"],
-                            row["engagedSessions"],
-                            f"{dur:.0f}s",
+                            f"{int(row['sessions']):,}",
+                            f"{int(row['totalUsers']):,}",
+                            f"{int(row['engagedSessions']):,}",
+                            _fmt_duration(dur),
                         )
                     console.print(nvr_table)
             except Exception as e:
@@ -2050,9 +2070,9 @@ def compare(days, site):
                         pps = pv / max(sess, 1)
                         bc = "green" if bounce < 40 else ("yellow" if bounce < 60 else "red")
                         ltable.add_row(
-                            lp.get("landingPage", "?")[:45],
-                            str(sess), lp.get("totalUsers", "0"),
-                            str(engaged),
+                            _trunc(lp.get("landingPage", "?")),
+                            f"{sess:,}", f"{int(lp.get('totalUsers', 0)):,}",
+                            f"{engaged:,}",
                             f"[{bc}]{bounce:.0f}%[/]",
                             f"{pps:.1f}",
                         )
@@ -2079,9 +2099,9 @@ def compare(days, site):
                         pos = r.get("position", 0)
                         pc = "green" if pos <= 3 else ("yellow" if pos <= 10 else "red")
                         qtable.add_row(
-                            r["keys"][0][:40],
-                            str(int(r.get("clicks", 0))),
-                            str(int(r.get("impressions", 0))),
+                            _trunc(r["keys"][0], 40),
+                            f"{int(r.get('clicks', 0)):,}",
+                            f"{int(r.get('impressions', 0)):,}",
                             f"{ctr:.1f}%",
                             f"[{pc}]{pos:.1f}[/]",
                         )
@@ -2102,9 +2122,9 @@ def compare(days, site):
                         ctr = r.get("ctr", 0) * 100
                         pos = r.get("position", 0)
                         ptable.add_row(
-                            url_path[:45],
-                            str(int(r.get("clicks", 0))),
-                            str(int(r.get("impressions", 0))),
+                            _trunc(url_path),
+                            f"{int(r.get('clicks', 0)):,}",
+                            f"{int(r.get('impressions', 0)):,}",
                             f"{ctr:.1f}%",
                             f"{pos:.1f}",
                         )
