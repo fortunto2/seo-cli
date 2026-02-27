@@ -108,15 +108,28 @@ def status():
     if google_ok:
         gsc_urls = _get_gsc_urls(sa)
 
-    # Pre-fetch CF zones
+    # Pre-fetch CF zones + 7-day traffic
     zone_map = {}
     zone_plans = {}
+    cf_traffic = {}
     if cf_ok:
         try:
-            from engines.cloudflare import list_zones
-            zones = list_zones(cfg["cloudflare"]["api_token"])
+            from engines.cloudflare import list_zones, get_zone_analytics
+            token = cfg["cloudflare"]["api_token"]
+            zones = list_zones(token)
             zone_map = {z["name"]: z["id"] for z in zones}
             zone_plans = {z["name"]: z.get("plan", "Free") for z in zones}
+            # Fetch 7-day pageviews per zone
+            start7 = (date.today() - timedelta(days=7)).isoformat()
+            end7 = date.today().isoformat()
+            for zname, zid in zone_map.items():
+                try:
+                    data = get_zone_analytics(token, zid, start7, end7)
+                    pv = sum(d["sum"]["pageViews"] for d in data)
+                    reqs = sum(d["sum"]["requests"] for d in data)
+                    cf_traffic[zname] = {"pv": pv, "reqs": reqs}
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -143,7 +156,7 @@ def status():
     table.add_column("Site", style="bold", min_width=14)
     table.add_column("GSC", justify="center")
     table.add_column("GA 7d", justify="right")
-    table.add_column("CF", justify="center")
+    table.add_column("CF 7d", justify="right")
     table.add_column("Hosting", justify="center", style="dim")
     table.add_column("IndexNow", justify="center")
 
@@ -167,12 +180,17 @@ def status():
         else:
             ga_str = "[dim]-[/]"
 
-        # CF zone
+        # CF zone + traffic
         cf_zone = zone_map.get(domain)
         if cf_zone:
-            plan = zone_plans.get(domain, "")
-            plan_short = "Ent" if "enterprise" in plan.lower() else ("Pro" if "pro" in plan.lower() else "Free")
-            cf_str = f"[green]{plan_short}[/]"
+            tr = cf_traffic.get(domain, {})
+            pv = tr.get("pv", 0)
+            if pv >= 1000:
+                cf_str = f"{pv / 1000:.1f}K pv"
+            elif pv > 0:
+                cf_str = f"{pv:,} pv"
+            else:
+                cf_str = "[dim]0[/]"
         else:
             cf_str = "[dim]-[/]"
 
@@ -187,7 +205,7 @@ def status():
     console.print(table)
 
     # Legend
-    console.print("  [dim]GSC=Google Search Console | GA 7d=users/sessions last 7 days | CF=Cloudflare plan[/]\n")
+    console.print("  [dim]GA 7d = users/sessions | CF 7d = pageviews (all traffic incl. bots)[/]\n")
 
 
 @cli.command()
