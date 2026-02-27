@@ -94,42 +94,100 @@ def cli():
 
 @cli.command()
 def status():
-    """Show all sites + engine connections."""
+    """Show all sites — indexing, analytics, traffic at a glance."""
     cfg = load_config()
     sites = cfg.get("sites", [])
-
-    table = Table(title=f"SEO CLI — {len(sites)} sites", box=box.ROUNDED)
-    table.add_column("Site", style="bold")
-    table.add_column("URL", style="cyan")
-    table.add_column("Google", justify="center")
-    table.add_column("Bing", justify="center")
-    table.add_column("Yandex", justify="center")
-    table.add_column("IndexNow", justify="center")
+    from urllib.parse import urlparse
 
     google_ok = _has_google(cfg)
-    bing_ok = _has_bing(cfg)
-    yandex_ok = _has_yandex(cfg)
-    indexnow_ok = _has_indexnow(cfg)
+    cf_ok = _has_cloudflare(cfg)
+    sa = cfg.get("google", {}).get("service_account_file")
 
+    # Pre-fetch GSC sites
     gsc_urls = set()
     if google_ok:
-        gsc_urls = _get_gsc_urls(cfg["google"]["service_account_file"])
+        gsc_urls = _get_gsc_urls(sa)
+
+    # Pre-fetch CF zones
+    zone_map = {}
+    zone_plans = {}
+    if cf_ok:
+        try:
+            from engines.cloudflare import list_zones
+            zones = list_zones(cfg["cloudflare"]["api_token"])
+            zone_map = {z["name"]: z["id"] for z in zones}
+            zone_plans = {z["name"]: z.get("plan", "Free") for z in zones}
+        except Exception:
+            pass
+
+    # Pre-fetch GA overview for sites that have it
+    ga_data = {}
+    if google_ok:
+        try:
+            from engines.ga import get_overview
+            for s in sites:
+                pid = s.get("ga_property_id")
+                if pid:
+                    hostname = urlparse(s["url"]).hostname
+                    try:
+                        ov = get_overview(sa, pid, days=7, hostname=hostname)
+                        if ov:
+                            ga_data[s["name"]] = ov
+                    except Exception:
+                        pass
+        except ImportError:
+            pass
+
+    # Build table
+    table = Table(title=f"SEO CLI — {len(sites)} sites", box=box.ROUNDED)
+    table.add_column("Site", style="bold", min_width=14)
+    table.add_column("GSC", justify="center")
+    table.add_column("GA 7d", justify="right")
+    table.add_column("CF", justify="center")
+    table.add_column("Hosting", justify="center", style="dim")
+    table.add_column("IndexNow", justify="center")
+
+    indexnow_ok = _has_indexnow(cfg)
 
     for s in sites:
-        from urllib.parse import urlparse
-        domain = urlparse(s["url"]).netloc
-        in_gsc = any(x in gsc_urls for x in [s["url"] + "/", s["url"], f"sc-domain:{domain}"])
+        domain = urlparse(s["url"]).hostname or ""
 
-        table.add_row(
-            s["name"],
-            s["url"],
-            "[green]Owner[/]" if google_ok and in_gsc else ("[yellow]--[/]" if google_ok else "[dim]off[/]"),
-            "[green]OK[/]" if bing_ok else "[dim]off[/]",
-            "[green]OK[/]" if yandex_ok else "[dim]off[/]",
-            "[green]OK[/]" if indexnow_ok else "[dim]off[/]",
-        )
+        # GSC status
+        in_gsc = any(x in gsc_urls for x in [s["url"] + "/", s["url"], f"sc-domain:{domain}"])
+        gsc_str = "[green]OK[/]" if in_gsc else "[dim]-[/]"
+
+        # GA 7-day sessions
+        ga_ov = ga_data.get(s["name"])
+        if ga_ov:
+            sess = ga_ov["sessions"]
+            users = ga_ov["users"]
+            ga_str = f"{users:,}u/{sess:,}s"
+        elif s.get("ga_property_id"):
+            ga_str = "[dim]0[/]"
+        else:
+            ga_str = "[dim]-[/]"
+
+        # CF zone
+        cf_zone = zone_map.get(domain)
+        if cf_zone:
+            plan = zone_plans.get(domain, "")
+            plan_short = "Ent" if "enterprise" in plan.lower() else ("Pro" if "pro" in plan.lower() else "Free")
+            cf_str = f"[green]{plan_short}[/]"
+        else:
+            cf_str = "[dim]-[/]"
+
+        # Hosting
+        hosting = s.get("hosting", "-")
+
+        # IndexNow
+        inow_str = "[green]OK[/]" if indexnow_ok else "[dim]-[/]"
+
+        table.add_row(s["name"], gsc_str, ga_str, cf_str, hosting, inow_str)
 
     console.print(table)
+
+    # Legend
+    console.print("  [dim]GSC=Google Search Console | GA 7d=users/sessions last 7 days | CF=Cloudflare plan[/]\n")
 
 
 @cli.command()
