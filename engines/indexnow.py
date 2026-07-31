@@ -26,11 +26,25 @@ def submit_sitemap_urls(key: str, site_url: str, sitemap_url: str) -> dict:
     """Fetch sitemap and submit all URLs via IndexNow."""
     import xml.etree.ElementTree as ET
 
-    resp = requests.get(sitemap_url, timeout=30)
-    resp.raise_for_status()
-    root = ET.fromstring(resp.content)
     ns = {"s": "http://www.sitemaps.org/schemas/sitemap/0.9"}
-    urls = [loc.text for loc in root.findall(".//s:loc", ns) if loc.text]
+
+    def fetch(url: str) -> list[str]:
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        root = ET.fromstring(resp.content)
+        locs = [loc.text for loc in root.findall(".//s:loc", ns) if loc.text]
+        # A <sitemapindex> lists other sitemaps, not pages — follow them one level.
+        if root.tag.endswith("sitemapindex"):
+            nested: list[str] = []
+            for child in locs:
+                try:
+                    nested.extend(fetch(child))
+                except Exception:
+                    continue
+            return nested
+        return locs
+
+    urls = fetch(sitemap_url)
 
     if not urls:
         return {"status": 0, "ok": False, "error": "No URLs found in sitemap"}
