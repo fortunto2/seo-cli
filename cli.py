@@ -2236,6 +2236,64 @@ def compare(days, site):
         console.print()
 
 
+@cli.command("agent-audit")
+@click.argument("url", required=False)
+def agent_audit(url):
+    """Agent-readiness audit. Audits all sites if no URL given.
+
+    What an AI agent can discover, read and act on: robots rules for GPTBot and friends,
+    llms.txt, markdown negotiation, MCP and A2A cards.
+
+    The first request is for a path that cannot exist. Sites that answer 200 for it make every
+    existence check meaningless, so those are flagged and content is verified instead of
+    status codes.
+
+        seo agent-audit https://example.com
+    """
+    cfg = load_config(required=not url)
+    from engines.agent_ready import audit_agent_readiness, format_report
+
+    urls = [url] if url else [s["url"] for s in cfg.get("sites", [])]
+    if not urls:
+        console.print("[red]ERROR:[/] No URL provided and no sites in config.")
+        return
+
+    results = []
+    for target in urls:
+        if len(urls) > 1:
+            console.print(f"  [dim]Checking {target}...[/]")
+        results.append(audit_agent_readiness(target))
+
+    if len(urls) == 1:
+        console.print(format_report(results[0]))
+        console.print()
+        return
+
+    table = Table(title="Agent readiness", box=box.SIMPLE)
+    table.add_column("Site", style="cyan")
+    table.add_column("Score", justify="right")
+    table.add_column("404s", justify="center")
+    table.add_column("Missing", style="dim")
+    for r in results:
+        missing = ", ".join(c["name"] for c in r["checks"] if not c["ok"] and c["category"] != "sanity")
+        pct = int(r["score"] / r["max_score"] * 100) if r["max_score"] else 0
+        table.add_row(
+            r["url"].replace("https://", ""),
+            f"{r['score']}/{r['max_score']} ({pct}%)",
+            "[red]soft[/]" if r["soft_404"] else "[green]ok[/]",
+            _trunc(missing, 52),
+        )
+    console.print()
+    console.print(table)
+    soft = [r["url"] for r in results if r["soft_404"]]
+    if soft:
+        console.print(
+            f"\n[yellow]{len(soft)} site(s) answer 200 for paths that do not exist.[/] "
+            "Agents and crawlers see files that are not there; Google counts it as a quality problem."
+        )
+    console.print()
+
+
 def main():
     cli()
 
