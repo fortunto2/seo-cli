@@ -11,13 +11,23 @@ import yake
 import textstat
 
 
-def _fetch(url: str, timeout: int = 15) -> requests.Response | None:
+def _fetch(url: str, timeout: int = 25) -> requests.Response | None:
+    """Fetch with a sane encoding and a timeout that survives a server-rendered corpus.
+
+    Two defaults bite here. `requests` falls back to ISO-8859-1 for text/* without a charset,
+    per RFC 2616 — which turns every Cyrillic title in a report into mojibake. And 15s was too
+    short for /llms-full.txt on a site that renders two hundred posts on demand: the file was
+    reported missing while it existed and answered in twelve seconds.
+    """
     try:
-        return requests.get(url, timeout=timeout, headers={
+        resp = requests.get(url, timeout=timeout, headers={
             "User-Agent": "Mozilla/5.0 (compatible; SEO-CLI/1.0)"
         })
     except Exception:
         return None
+    if "charset" not in resp.headers.get("content-type", "").lower():
+        resp.encoding = resp.apparent_encoding or "utf-8"
+    return resp
 
 
 def _extract_meta(html: str, name: str) -> str:
@@ -257,10 +267,15 @@ def audit_url(url: str, skip_speed: bool = False) -> dict:
     # ─── Structured Data ─────────────────────────────────────────
     jsonld = _extract_jsonld(html)
     types = [d.get("@type", "?") for d in jsonld]
-    add("schema", "JSON-LD", len(jsonld) > 0, ", ".join(types) if types else "",
+    types_flat = [t if isinstance(t, str) else "/".join(str(x) for x in t) for t in types]
+    add("schema", "JSON-LD", len(jsonld) > 0, ", ".join(types_flat) if types_flat else "",
         "No structured data" if not jsonld else "")
 
-    has_org = any(t in ("Organization", "WebSite") for t in types)
+    has_org = any(
+        (t == "Organization" or t == "WebSite") if isinstance(t, str)
+        else any(x in ("Organization", "WebSite") for x in t)
+        for t in types
+    )
     add("schema", "Organization/WebSite", has_org, "",
         "Add Organization or WebSite schema" if not has_org else "")
 
@@ -299,10 +314,17 @@ def audit_url(url: str, skip_speed: bool = False) -> dict:
     robots_resp = _fetch(f"{base}/robots.txt")
     ai_bots_blocked = False
     if robots_resp and robots_resp.status_code == 200:
-        robots_text = robots_resp.text.lower()
+        # Read the bot's OWN group, not the whole file. The previous rule was "the name
+        # appears AND the word disallow appears anywhere", so a robots.txt that names GPTBot
+        # in order to ALLOW it failed the moment any unrelated Disallow existed — the check
+        # punished exactly the behaviour it exists to encourage.
         blocked_bots = []
-        for bot in ["gptbot", "chatgpt-user", "claude-web", "anthropic", "perplexitybot", "cohere-ai"]:
-            if bot in robots_text and "disallow" in robots_text:
+        for bot in ["gptbot", "chatgpt-user", "claude-web", "claudebot", "anthropic",
+                    "perplexitybot", "cohere-ai", "google-extended"]:
+            group = re.search(
+                rf"^user-agent:\s*{re.escape(bot)}\s*$(.*?)(?=^user-agent:|\Z)",
+                robots_resp.text.lower(), re.M | re.S)
+            if group and re.search(r"^disallow:\s*/\s*$", group.group(1), re.M):
                 blocked_bots.append(bot)
         if blocked_bots:
             ai_bots_blocked = True
