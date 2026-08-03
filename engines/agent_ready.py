@@ -178,7 +178,10 @@ def audit_agent_readiness(url: str) -> dict:
 
     # ─── Capability discovery ────────────────────────────────────
     for path, label, expect in (
-        ("/.well-known/mcp.json", "MCP server card", "json"),
+        # SEP-1649 puts the card at /.well-known/mcp/server-card.json. The first version of
+        # this checked /.well-known/mcp.json and reported 404 for sites that publish it
+        # correctly — a checker that invents its own path is worse than no checker.
+        ("/.well-known/mcp/server-card.json", "MCP server card", "json"),
         ("/.well-known/agent-card.json", "A2A agent card", "json"),
         ("/.well-known/api-catalog", "API catalog", "any"),
         ("/.well-known/oauth-protected-resource", "OAuth resource", "json"),
