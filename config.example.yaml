@@ -51,3 +51,12 @@ sites:
   #   github: "user/another-site"
   #   framework: "astro"
   #   hosting: "cloudflare"
+
+# superduper-analytics — who actually visited, and which AI agents read the sites.
+# Spoken to over MCP, the same server Claude and ChatGPT connect to, so there is one contract
+# to keep working rather than a private REST endpoint alongside it.
+analytics:
+  url: "https://analytics.superduperai.co/mcp"
+  # The Worker's DASHBOARD_KEY secret. These are business numbers; without it the server
+  # answers 401 and says how to authenticate.
+  key: ""

@@ -2294,6 +2294,64 @@ def agent_audit(url):
     console.print()
 
 
+@cli.command()
+@click.option("--days", default=7, show_default=True, help="Window in days (max 90).")
+def traffic(days):
+    """Who actually visited, from superduper-analytics.
+
+    `agent-audit` says whether a site CAN be found and read; this says whether anyone came.
+    Bots are excluded from people and page views and reported separately, and the figures say
+    when sampling made them a lower bound.
+    """
+    from engines.analytics import AnalyticsError, call_tool, config_from
+
+    cfg = load_config(required=True)
+    try:
+        url, key = config_from(cfg)
+        console.print(call_tool(url, key, "traffic", {"days": days}))
+        console.print()
+        console.print("[dim]Counters not installed anywhere? Run `seo products`.[/]")
+    except AnalyticsError as exc:
+        console.print(f"[red]ERROR:[/] {exc}")
+
+
+@cli.command()
+def agents():
+    """Which AI agents read the sites, and why they came.
+
+    An AI Assistant fetch means someone asked a question right now; an AI Crawler is building
+    an index. Same traffic, opposite meaning. These never appear in `traffic` — agents do not
+    run JavaScript, so the page counter never sees them.
+    """
+    from engines.analytics import AnalyticsError, call_tool, config_from
+
+    cfg = load_config(required=True)
+    try:
+        url, key = config_from(cfg)
+        console.print(call_tool(url, key, "agent_traffic"))
+    except AnalyticsError as exc:
+        console.print(f"[red]ERROR:[/] {exc}")
+
+
+@cli.command()
+def products():
+    """Every registered product, and whether its counter reports.
+
+    Read this before concluding a product has no traffic: one with no counter installed
+    reports zero for reasons that have nothing to do with how it is doing.
+    """
+    from engines.analytics import AnalyticsError, call_tool, config_from
+
+    cfg = load_config(required=True)
+    try:
+        url, key = config_from(cfg)
+        console.print(call_tool(url, key, "list_products"))
+        console.print()
+        console.print(call_tool(url, key, "counter_coverage", {"days": 7}))
+    except AnalyticsError as exc:
+        console.print(f"[red]ERROR:[/] {exc}")
+
+
 def main():
     cli()
 
