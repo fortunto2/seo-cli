@@ -82,6 +82,23 @@ def _exists(base: str, path: str, *, soft404: bool, expect: str = "any") -> tupl
     return True, "ok"
 
 
+def _sample_page(base: str) -> str | None:
+    """A real content URL from the sitemap, so negotiation is tested where content lives."""
+    for candidate in ("/sitemap-index.xml", "/sitemap.xml"):
+        resp = _get(f"{base}{candidate}")
+        if resp is None or resp.status_code != 200:
+            continue
+        locs = re.findall(r"<loc>([^<]+)</loc>", resp.text)
+        # An index points at more sitemaps; follow one hop.
+        if locs and locs[0].endswith(".xml"):
+            inner = _get(locs[0])
+            locs = re.findall(r"<loc>([^<]+)</loc>", inner.text) if inner is not None else []
+        pages = [u for u in locs if u.rstrip("/") != base.rstrip("/") and not u.endswith(".xml")]
+        if pages:
+            return pages[-1]
+    return None
+
+
 def audit_agent_readiness(url: str) -> dict:
     """Returns the same shape as engines.audit.audit_url: url, score, max_score, checks[]."""
     base = url.rstrip("/")
@@ -140,10 +157,23 @@ def audit_agent_readiness(url: str) -> dict:
         "Optional: Content-Signals in robots.txt states search/ai-train/ai-input intent")
 
     # ─── Machine-readable content ────────────────────────────────
-    md = _get(f"{base}/", accept="text/markdown")
-    md_ok = md is not None and "markdown" in md.headers.get("content-type", "").lower()
+    # Probe the home page AND a real content page. A site whose root is an index often has no
+    # markdown source for it while every article does, and calling that "no negotiation" is the
+    # same false negative the soft-404 guard exists to prevent — in the other direction.
+    md_ok, md_where, md_ctype = False, "", "not offered"
+    for label, probe in (("home", f"{base}/"), ("a page", _sample_page(base))):
+        if probe is None:
+            continue
+        md = _get(probe, accept="text/markdown")
+        if md is None:
+            continue
+        ctype = md.headers.get("content-type", "").lower()
+        if "markdown" in ctype:
+            md_ok, md_where, md_ctype = True, label, ctype
+            break
+        md_ctype = ctype or "?"
     add("content", "Markdown negotiation", md_ok,
-        md.headers.get("content-type", "?") if md is not None else "unreachable",
+        f"{md_ctype} (on {md_where})" if md_ok else md_ctype,
         "Optional: serve text/markdown when asked, so agents skip HTML parsing")
 
     # ─── Capability discovery ────────────────────────────────────
