@@ -63,13 +63,20 @@ def _has_cloudflare(cfg: dict) -> bool:
 
 _gsc_cache: set[str] | None = None
 
+# Search Console lists properties the account cannot actually use. `seo launch` adds a site and
+# leaves it at siteUnverifiedUser until someone verifies ownership, so a domain can appear twice —
+# once usable, once not — and picking by name alone picks the wrong one about half the time.
+_GSC_USABLE = {"siteOwner", "siteFullUser", "siteRestrictedUser"}
+
 
 def _get_gsc_urls(sa_file: str) -> set[str]:
     global _gsc_cache
     if _gsc_cache is None:
         from engines.google_sc import list_sites
         sites = list_sites(sa_file)
-        _gsc_cache = {s["siteUrl"] for s in sites}
+        _gsc_cache = {
+            s["siteUrl"] for s in sites if s.get("permissionLevel") in _GSC_USABLE
+        }
     return _gsc_cache
 
 
