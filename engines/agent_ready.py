@@ -19,6 +19,7 @@ treats them as a quality problem.
 """
 
 import json
+from urllib.parse import urlparse
 import random
 import re
 import string
@@ -100,8 +101,15 @@ def _sample_page(base: str) -> str | None:
 
 
 def audit_agent_readiness(url: str) -> dict:
-    """Returns the same shape as engines.audit.audit_url: url, score, max_score, checks[]."""
-    base = url.rstrip("/")
+    """Returns the same shape as engines.audit.audit_url: url, score, max_score, checks[].
+
+    Site-wide files live at the origin, not next to the page you passed in. Auditing
+    https://example.com/blog/post used to fetch /blog/post/robots.txt and report every
+    discoverability check as missing — a site with a perfect setup scored 2/12 because the
+    checker looked in the wrong place.
+    """
+    parsed = urlparse(url if "://" in url else f"https://{url}")
+    base = f"{parsed.scheme}://{parsed.netloc}"
     checks: list[dict] = []
 
     def add(category: str, name: str, ok: bool, value: str = "", hint: str = "") -> None:
