@@ -6,3 +6,10 @@ __pycache__/
 .claude/settings.local.json
 uv.lock
 .vercel
+
+# Build artefacts and scratch. Untracked but unignored is the dangerous state: one `git add -A`
+# and a wheel build ends up in the history of a repo whose whole job is a CLI.
+build/
+*.egg-info/
+tasks/
+.DS_Store
