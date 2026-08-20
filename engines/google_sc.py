@@ -35,14 +35,28 @@ def list_sitemaps(sa_file: str, site_url: str) -> list:
 
 
 def get_search_analytics(
-    sa_file: str, site_url: str, start_date: str, end_date: str, dimensions: list[str] | None = None
+    sa_file: str,
+    site_url: str,
+    start_date: str,
+    end_date: str,
+    dimensions: list[str] | None = None,
+    row_limit: int = 1000,
 ) -> dict:
+    """Search Console rows for a window.
+
+    `row_limit` used to be a hard-coded 25, which is fine for a dashboard and wrong for
+    anything that stores the result. A young site with thirty queries at one impression each
+    gets an arbitrary twenty-five of them back, and which twenty-five varies between calls —
+    so a caller comparing two snapshots sees queries "appear" and "disappear" that never moved
+    in Google at all. A thousand is still far below the API's ceiling of 25,000 and covers
+    every site here whole.
+    """
     service = _build_service(sa_file, "webmasters", "v3")
     body = {
         "startDate": start_date,
         "endDate": end_date,
         "dimensions": dimensions or ["query"],
-        "rowLimit": 25,
+        "rowLimit": row_limit,
     }
     return service.searchanalytics().query(siteUrl=site_url, body=body).execute()
 
