@@ -2323,6 +2323,48 @@ def traffic(days):
 
 
 @cli.command()
+@click.option("--days", default=28, show_default=True, help="Window in days (max 90).")
+def retention(days):
+    """Do people come back to the apps — the demand signal in this stack.
+
+    Everything else here counts arrivals. This counts the ones who came back on their own,
+    which is the difference between traffic and a product.
+
+    Apps only, and not as a limitation to fix later: the web id is derived at the edge and
+    dies at midnight UTC, so a returning visitor is invisible there by design. An app sends
+    an install-scoped UUID that survives until the app is deleted.
+    """
+    from engines.analytics import AnalyticsError, call_tool, config_from
+
+    cfg = load_config(required=True)
+    try:
+        url, key = config_from(cfg)
+        console.print(call_tool(url, key, "retention", {"days": days}))
+    except AnalyticsError as exc:
+        console.print(f"[red]ERROR:[/] {exc}")
+
+
+@cli.command()
+@click.option("--days", default=28, show_default=True, help="Window in days (max 90).")
+@click.option("--min-views", default=10, show_default=True, help="Ignore pages below this many views.")
+def conversion(days, min_views):
+    """Which pages make people act — goals against views of the same page.
+
+    `seo audit` says whether a page is well built. This says whether it works: a page with
+    traffic and no action has an unclear next step, and that is cheaper to fix than finding
+    more traffic.
+    """
+    from engines.analytics import AnalyticsError, call_tool, config_from
+
+    cfg = load_config(required=True)
+    try:
+        url, key = config_from(cfg)
+        console.print(call_tool(url, key, "conversion", {"days": days, "min_views": min_views}))
+    except AnalyticsError as exc:
+        console.print(f"[red]ERROR:[/] {exc}")
+
+
+@cli.command()
 def agents():
     """Which AI agents read the sites, and why they came.
 
