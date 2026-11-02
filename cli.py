@@ -37,7 +37,33 @@ def load_config(required: bool = True) -> dict:
             sys.exit(1)
         return {}
     with open(CONFIG_PATH) as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f) or {}
+    token = _keychain(KEYCHAIN_CLOUDFLARE)
+    if token:
+        cfg.setdefault("cloudflare", {})["api_token"] = token
+    return cfg
+
+
+# The Cloudflare token lives in the macOS Keychain, not in config.yaml:
+#   security add-generic-password -U -a "$USER" -s seo-cli-cloudflare-token -w   (prompts)
+# config.yaml's cloudflare.api_token stays as the fallback on machines without the item.
+KEYCHAIN_CLOUDFLARE = "seo-cli-cloudflare-token"
+
+
+def _keychain(service: str) -> str | None:
+    import os
+    import shutil
+    import subprocess
+
+    if not shutil.which("security"):
+        return None
+    r = subprocess.run(
+        ["security", "find-generic-password", "-a", os.environ.get("USER", ""), "-s", service, "-w"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return r.stdout.strip() or None
 
 
 def _has_google(cfg: dict) -> bool:
