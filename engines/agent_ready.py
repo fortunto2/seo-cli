@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 import random
 import re
 import string
+from typing import NamedTuple
 
 import requests
 
@@ -98,6 +99,156 @@ def _sample_page(base: str) -> str | None:
         if pages:
             return pages[-1]
     return None
+
+
+# ─── Deep checks on agent-facing files ───────────────────────────────────────────────────
+# Ported from the Connect.ARLI scanner (connect.arliwork.com/mcp/scanner.py: check_agents_txt,
+# check_agent_card, check_ard_catalog, check_api_catalog), tightened where the scanner only
+# looks at presence. Each `judge_*` is a pure function of one response, so unit tests feed it
+# fixtures and never touch the network. They return (ok, detail).
+
+# ARD 1.0 entry types: every one names something an agent can use, never a page for people.
+ARD_AGENTIC_TYPES = {
+    "application/ai-catalog+json",
+    "application/agent-card+json",
+    "application/a2a-agent-card+json",
+    "application/mcp-server-card+json",
+    "application/agent-skills+zip",
+    "application/agent-skills+gzip",
+    'text/markdown;profile="urn:air:agent-skills"',
+    "application/ai-registry",
+    "application/ai-registry+json",
+}
+
+# A2A AgentCard fields a client cannot work without.
+A2A_REQUIRED = ("name", "description", "url", "version", "capabilities",
+                "defaultInputModes", "defaultOutputModes", "skills")
+
+AGENTS_TXT_PATHS = ("/agents.txt", "/.well-known/agents.txt", "/ai.txt", "/.well-known/ai.txt")
+ARD_PATHS = ("/.well-known/ai-catalog.json", "/.well-known/ard.json")
+
+_DIRECTIVE = re.compile(r"^\s*[A-Za-z][A-Za-z0-9_-]*\s*:\s*\S", re.M)
+
+
+class Probe(NamedTuple):
+    """The three facts about a response the judges need."""
+
+    status: int | None
+    ctype: str
+    text: str
+
+
+def _probe(url: str, accept: str | None = None) -> Probe:
+    resp = _get(url, accept)
+    if resp is None:
+        return Probe(None, "", "")
+    return Probe(resp.status_code, resp.headers.get("content-type", "").lower(), resp.text)
+
+
+def _is_html(p: Probe) -> bool:
+    return "html" in p.ctype or p.text.lstrip()[:15].lower().startswith(("<!doctype", "<html"))
+
+
+def _json_object(p: Probe) -> tuple[dict | None, str]:
+    """(object, "") when the body is a JSON object, else (None, why)."""
+    if p.status is None:
+        return None, "unreachable"
+    if p.status != 200:
+        return None, str(p.status)
+    if _is_html(p):
+        return None, "200 but HTML"
+    try:
+        data = json.loads(p.text)
+    except ValueError:
+        return None, "200 but not JSON"
+    if not isinstance(data, dict):
+        return None, "JSON is not an object"
+    return data, ""
+
+
+def judge_agents_txt(p: Probe) -> tuple[bool, str]:
+    """Present as text and holds at least one `Key: value` directive (not only comments)."""
+    if p.status != 200:
+        return False, "missing" if p.status else "unreachable"
+    if _is_html(p):
+        return False, "200 but HTML"
+    body = "\n".join(ln for ln in p.text.splitlines() if not ln.lstrip().startswith("#"))
+    if not body.strip():
+        return False, "empty or only comments"
+    if not _DIRECTIVE.search(body):
+        return False, "no `Key: value` directives, not parseable"
+    return True, f"{len(_DIRECTIVE.findall(body))} directives"
+
+
+def judge_agent_card(p: Probe) -> tuple[bool, str]:
+    """Valid JSON with the A2A fields a client needs, and well-formed skills."""
+    card, why = _json_object(p)
+    if card is None:
+        return False, why
+    missing = [k for k in A2A_REQUIRED if card.get(k) in (None, "", [])]
+    if missing:
+        return False, "missing " + ", ".join(missing)
+    if not isinstance(card["skills"], list):
+        return False, "skills is not a list"
+    bad = [str(i) for i, s in enumerate(card["skills"])
+           if not (isinstance(s, dict) and s.get("id") and s.get("name") and s.get("description"))]
+    if bad:
+        return False, "skills without id/name/description at index " + ",".join(bad[:5])
+    return True, f"{len(card['skills'])} skills"
+
+
+def _norm_type(t: object) -> str:
+    return re.sub(r"\s+", "", str(t)).lower()
+
+
+def judge_ard_catalog(p: Probe) -> tuple[bool, str]:
+    """Only agentic entry types, and one entry per resource (skill): no repeated identifier or url."""
+    cat, why = _json_object(p)
+    if cat is None:
+        return False, why
+    entries = cat.get("entries")
+    if not isinstance(entries, list) or not entries:
+        return False, "no entries"
+    known = {_norm_type(t) for t in ARD_AGENTIC_TYPES}
+    foreign = sorted({str(e.get("type")) for e in entries
+                      if not isinstance(e, dict) or _norm_type(e.get("type")) not in known})
+    if foreign:
+        return False, "non-agentic types: " + ", ".join(foreign[:4])
+    for key in ("identifier", "url"):
+        vals = [e.get(key) for e in entries]
+        if not all(vals):
+            return False, f"entry without {key}"
+        dup = sorted({v for v in vals if vals.count(v) > 1})
+        if dup:
+            return False, f"duplicate {key}: {dup[0]}"
+    return True, f"{len(entries)} entries, all agentic, unique"
+
+
+def judge_api_catalog(p: Probe) -> tuple[bool, str]:
+    """RFC 9727: served as application/linkset+json and the body is a linkset."""
+    if p.status != 200:
+        return False, "missing" if p.status else "unreachable"
+    if _is_html(p):
+        return False, "200 but HTML"
+    if "linkset+json" not in p.ctype:
+        return False, f"Content-Type {p.ctype or 'absent'}, need application/linkset+json"
+    doc, why = _json_object(p)
+    if doc is None or not isinstance(doc.get("linkset"), list) or not doc["linkset"]:
+        return False, why or "no linkset array"
+    return True, f"{len(doc['linkset'])} linkset entries"
+
+
+def _first(paths: tuple[str, ...], base: str, judge, accept: str) -> tuple[bool, str]:
+    """First path that exists decides; if none exist, report the last reason."""
+    last = (False, "missing")
+    for path in paths:
+        ok, why = judge(_probe(f"{base}{path}", accept))
+        if ok:
+            return True, f"{why} ({path})"
+        if why not in ("missing", "404", "200 but HTML", "unreachable"):
+            return False, f"{path}: {why}"  # exists but is broken: say so, do not look further
+        last = (False, why)
+    return last
 
 
 def audit_agent_readiness(url: str) -> dict:
@@ -190,12 +341,28 @@ def audit_agent_readiness(url: str) -> dict:
         # this checked /.well-known/mcp.json and reported 404 for sites that publish it
         # correctly — a checker that invents its own path is worse than no checker.
         ("/.well-known/mcp/server-card.json", "MCP server card", "json"),
-        ("/.well-known/agent-card.json", "A2A agent card", "json"),
-        ("/.well-known/api-catalog", "API catalog", "any"),
         ("/.well-known/oauth-protected-resource", "OAuth resource", "json"),
     ):
         ok, why = _exists(base, path, soft404=soft404, expect=expect)
         add("capability", label, ok, "found" if ok else why, f"Optional: publish {path}")
+
+    for label, ok_why, hint in (
+        ("agents.txt / ai.txt",
+         _first(AGENTS_TXT_PATHS, base, judge_agents_txt, "text/plain,*/*"),
+         "Optional: /agents.txt (or /.well-known/ai.txt) in plain `Key: value` lines"),
+        ("A2A agent card",
+         _first(("/.well-known/agent-card.json",), base, judge_agent_card, "application/json"),
+         "Optional: /.well-known/agent-card.json with name, description, url, version, "
+         "capabilities, input/output modes and skills"),
+        ("ARD catalog",
+         _first(ARD_PATHS, base, judge_ard_catalog, "application/json"),
+         "Optional: /.well-known/ai-catalog.json, agentic entry types only, one entry per skill"),
+        ("API catalog (RFC 9727)",
+         _first(("/.well-known/api-catalog",), base, judge_api_catalog,
+                "application/linkset+json,*/*"),
+         "Optional: /.well-known/api-catalog served as application/linkset+json"),
+    ):
+        add("capability", label, ok_why[0], ok_why[1], hint)
 
     score = sum(1 for c in checks if c["ok"])
     return {
